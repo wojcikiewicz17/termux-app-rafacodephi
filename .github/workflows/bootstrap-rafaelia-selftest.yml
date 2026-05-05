@@ -1,0 +1,59 @@
+name: bootstrap-rafaelia-selftest
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'bootstrap_rafaelia/**'
+      - '.github/workflows/bootstrap-rafaelia-selftest.yml'
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build host-smoke
+        run: make -C bootstrap_rafaelia clean host-smoke
+      - name: Upload host log
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-rafaelia-selftest-log
+          path: bootstrap_rafaelia/selftest.log
+
+  ndk-freestanding-matrix:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm32, arm64, x86, x86_64, riscv64, armv7a-neon]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
+      - name: Resolve NDK version
+        id: ndk
+        run: |
+          NDK_VERSION=$(grep -E '^ndkVersion=' gradle.properties | head -n1 | cut -d= -f2- | tr -d '[:space:]')
+          echo "ndk=$NDK_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Install NDK
+        run: sdkmanager "ndk;${{ steps.ndk.outputs.ndk }}"
+      - name: Build freestanding objects (${{ matrix.arch }})
+        env:
+          NDK: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ steps.ndk.outputs.ndk }}
+        run: |
+          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          if bootstrap_rafaelia/check_target_support.sh "${{ matrix.arch }}" 24; then
+            make -C bootstrap_rafaelia clean arm-freestanding ARCH=${{ matrix.arch }}
+          else
+            echo "SKIP_UNSUPPORTED_ARCH=${{ matrix.arch }}" | tee bootstrap_rafaelia/skip_${{ matrix.arch }}.log
+          fi
+      - name: Upload objects (${{ matrix.arch }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-rafaelia-${{ matrix.arch }}-objects
+          path: |
+            bootstrap_rafaelia/raf_main.${{ matrix.arch }}.o
+            bootstrap_rafaelia/entry_${{ matrix.arch }}.o
+            bootstrap_rafaelia/skip_${{ matrix.arch }}.log
+          if-no-files-found: ignore
