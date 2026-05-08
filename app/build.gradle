@@ -414,8 +414,10 @@ tasks.register("downloadBootstraps") {
 }
 
 tasks.register("buildDeveloperBootstraps", Exec) {
+    description = 'Compiles RAFCODEΦ local bootstrap zip artifacts for CI/developer builds.'
+    group = 'build setup'
     workingDir rootProject.projectDir
-    commandLine "bash", "scripts/generate_developer_bootstraps.sh"
+    commandLine "bash", "scripts/build_rafaelia_bootstraps.sh"
 }
 
 
@@ -435,18 +437,24 @@ task verifyBootstrapZipsPresent {
         def missing = requiredZips.findAll { !new File(projectDir, it).exists() }
         if (!missing.isEmpty()) {
             throw new GradleException('Missing required bootstrap zip artifacts:\n - ' + missing.join('\n - ') +
-                '\nRun :app:downloadBootstraps to generate them before native build tasks.')
+                '\nRun :app:ensureBootstrapArchives to compile or download them before native build tasks.')
+        }
+
+        requiredZips.each { path ->
+            requiredBootstrapMetadata(new File(projectDir, path), project.ext.bootstrapMetadataPackageName, project.ext.bootstrapRequiredPageSize, "strict")
         }
 
     }
 }
 
 tasks.register("ensureBootstrapArchives") {
-    description = 'Downloads and validates all bootstrap zip artifacts required by native bootstrap ASM embedding.'
+    description = 'Compiles/downloads and validates all bootstrap zip artifacts required by native bootstrap ASM embedding.'
     group = 'build setup'
-    def useDevBootstrap = (project.findProperty("RAF_BOOTSTRAP_SOURCE") ?: System.getenv("RAF_BOOTSTRAP_SOURCE") ?: "").toString().toLowerCase() == "local"
-    dependsOn(useDevBootstrap ? tasks.named("buildDeveloperBootstraps") : tasks.named("downloadBootstraps"))
+    def useDevBootstrap = (project.findProperty("RAF_BOOTSTRAP_SOURCE") ?: System.getenv("RAF_BOOTSTRAP_SOURCE") ?: "local").toString().toLowerCase() == "local"
+    def producer = useDevBootstrap ? tasks.named("buildDeveloperBootstraps") : tasks.named("downloadBootstraps")
+    dependsOn(producer)
     dependsOn(tasks.named("verifyBootstrapZipsPresent"))
+    tasks.named("verifyBootstrapZipsPresent").configure { mustRunAfter(producer) }
 }
 def requiredBootstrapMetadata(File file, String expectedPackageName, String expectedPageSize, String validationMode) {
     def zipFile = new java.util.zip.ZipFile(file)

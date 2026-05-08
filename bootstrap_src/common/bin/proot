@@ -1,0 +1,4 @@
+#!/system/bin/sh
+# RAFCODEPHI local bootstrap compatibility stub.
+echo "RAFCODEPHI bootstrap proot stub"
+exit 0

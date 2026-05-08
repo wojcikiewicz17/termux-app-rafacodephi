@@ -1,0 +1,4 @@
+#!/system/bin/sh
+# RAFCODEPHI local bootstrap compatibility stub.
+echo "RAFCODEPHI bootstrap busybox stub"
+exit 0

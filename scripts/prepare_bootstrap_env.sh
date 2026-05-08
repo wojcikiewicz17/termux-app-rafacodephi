@@ -13,7 +13,22 @@ elif [[ $# -gt 0 ]]; then
 fi
 
 ./scripts/ci_android_preflight.sh >&2
-./gradlew :app:downloadBootstraps --no-daemon >&2
+
+BOOTSTRAP_SOURCE="${RAF_BOOTSTRAP_SOURCE:-local}"
+case "$BOOTSTRAP_SOURCE" in
+  local)
+    ./scripts/build_rafaelia_bootstraps.sh >&2
+    ;;
+  upstream)
+    ./gradlew :app:downloadBootstraps --no-daemon >&2
+    ;;
+  *)
+    echo "Unsupported RAF_BOOTSTRAP_SOURCE=$BOOTSTRAP_SOURCE (allowed: local, upstream)" >&2
+    exit 2
+    ;;
+esac
+
+./scripts/verify_bootstrap_contract.sh --check >&2
 
 if ! python3 -c 'import blake3' >/dev/null 2>&1; then
   python3 -m pip install --user blake3 >&2

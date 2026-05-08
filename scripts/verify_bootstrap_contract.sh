@@ -46,6 +46,50 @@ emit_hashes_lowlevel(){
   (( has_b3 == 1 )) || log "b3sum unavailable; BLAKE3 skipped (SHA256 emitted)."
 }
 
+
+check_bootstrap_metadata(){
+  python3 - <<'PY'
+from pathlib import Path
+from zipfile import ZipFile
+
+base = Path('app/src/main/cpp')
+expected_package = 'com.termux.rafacodephi'
+expected_page = '16384'
+archives = {
+    'bootstrap-aarch64.zip': ('aarch64', '21'),
+    'bootstrap-arm.zip': ('arm', '28'),
+    'bootstrap-i686.zip': ('i686', '21'),
+    'bootstrap-x86_64.zip': ('x86_64', '21'),
+}
+for name, (arch, min_api) in archives.items():
+    path = base / name
+    with ZipFile(path) as zf:
+        info = zf.read('BOOTSTRAP_INFO').decode('utf-8')
+        names = set(zf.namelist())
+    metadata = {}
+    for line in info.splitlines():
+        if '=' in line and not line.lstrip().startswith('#'):
+            key, value = line.split('=', 1)
+            metadata[key.strip()] = value.strip()
+    required_entries = {'BOOTSTRAP_INFO', 'SYMLINKS.txt', 'bin/sh', 'bin/pkg', 'bin/busybox', 'bin/proot'}
+    missing = sorted(required_entries - names)
+    if missing:
+        raise SystemExit(f'{path}: missing entries: {missing}')
+    expected = {
+        'TERMUX_PACKAGE_NAME': expected_package,
+        'TERMUX_ARCH': arch,
+        'TERMUX_PAGE_SIZE': expected_page,
+        'TERMUX_MIN_API': min_api,
+        'RAFCODEPHI_BOOTSTRAP': 'local-ci',
+    }
+    for key, value in expected.items():
+        actual = metadata.get(key)
+        if actual != value:
+            raise SystemExit(f'{path}: {key} expected {value!r}, got {actual!r}')
+print('metadata OK for RAFCODEPHI local bootstraps')
+PY
+}
+
 check_runtime_prefix(){
   local p="${PREFIX:-${TERMUX_PREFIX:-}}"
   [[ -n "$p" ]] || { log "PREFIX/TERMUX_PREFIX not set; runtime check skipped (build mode)."; return 0; }
@@ -64,6 +108,8 @@ check_bootstraps(){
     check_zip_valid_lowlevel "$BOOTSTRAP_DIR/$z"
     log "Zip validation OK: $BOOTSTRAP_DIR/$z"
   done
+  check_bootstrap_metadata
+  log "BOOTSTRAP_INFO metadata OK"
   emit_hashes_lowlevel
 }
 
