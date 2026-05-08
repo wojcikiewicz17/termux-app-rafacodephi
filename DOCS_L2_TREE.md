@@ -12,6 +12,7 @@
 - **Release & Signing**: trilha unsigned (validação interna) e trilha signed opt-in (variáveis explícitas).
 - **Runtime Android**: side-by-side package, compatibilidade Android 12+ (phantom process) e 15/16.
 - **Documentação & Auditoria**: inventários, auditorias por módulo e guias técnicos.
+- **Contrato Conceitual RAFAELIA**: mapa de transporte semântico para `T^7`, 42 ciclos, Hz/memória, multilíngue, integridade e política SDK/ABI.
 
 ## L2 — Árvore operacional mínima (o “tree L2”)
 
@@ -43,7 +44,8 @@
   ├─ JNI bridge fino
   ├─ dispatch runtime por capacidade
   ├─ fallback C seguro
-  └─ C/ASM otimizado quando disponível
+  ├─ C/ASM otimizado quando disponível
+  └─ docs/RAFAELIA_CONCEPT_CARRY_MAP.md como contrato antes de tocar claims complexos
 ```
 
 ## Estado do que já está pronto (nível L)
