@@ -47,6 +47,7 @@
   ├─ fallback C seguro
   ├─ C/ASM otimizado quando disponível
   ├─ docs/RAFAELIA_CONCEPT_CARRY_MAP.md como contrato antes de tocar claims complexos
+  ├─ docs /RAFAELIA_CONCEPT_CARRY_MAP.md como contrato antes de tocar claims complexos
   └─ scripts/build_rafaelia_bootstraps.sh antes do ASM incbin do APK
 ```
 
