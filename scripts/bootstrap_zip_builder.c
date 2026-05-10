@@ -16,7 +16,7 @@ static void le32(uint8_t* p,uint32_t v){p[0]=v&255;p[1]=(v>>8)&255;p[2]=(v>>16)&
 static int w(int fd,const void*buf,size_t n){return write(fd,buf,n)==(ssize_t)n?0:-1;}
 
 typedef struct{const char*name;const uint8_t*data;uint32_t size;uint32_t crc;uint32_t off;} E;
-static uint8_t sh_buf[4096], pkg_buf[4096], motd_buf[4096], build_only_buf[64], busybox_buf[4096], proot_buf[4096];
+static uint8_t sh_buf[4096], pkg_buf[4096], motd_buf[4096], build_only_buf[64], busybox_buf[4096], proot_buf[4096], symlinks_buf[1];
 
 static int load_file(const char* path, uint8_t* out, uint32_t* n){
   int fd=open(path,O_RDONLY);
@@ -33,8 +33,14 @@ int main(int argc,char**argv){
   const char* out=argv[1]; const char* abi=argv[2];
   static char info[256];
   const char* bootstrap_pkg=getenv("TERMUX_BOOTSTRAP_PACKAGE_NAME");
+  const char* page_size=getenv("TERMUX_BOOTSTRAP_PAGE_SIZE");
+  const char* min_api="21";
   if(!bootstrap_pkg||!bootstrap_pkg[0]) bootstrap_pkg="com.termux.rafacodephi";
-  int info_n=snprintf(info,sizeof(info),"TERMUX_PACKAGE_NAME=%s\nTERMUX_ARCH=%s\nTERMUX_PAGE_SIZE=16384\n",bootstrap_pkg,abi);
+  if(!page_size||!page_size[0]) page_size="16384";
+  if(strcmp(abi,"arm")==0) min_api="28";
+  int info_n=snprintf(info,sizeof(info),
+    "TERMUX_PACKAGE_NAME=%s\nTERMUX_ARCH=%s\nTERMUX_PAGE_SIZE=%s\nTERMUX_MIN_API=%s\nRAFCODEPHI_BOOTSTRAP=local-ci\n",
+    bootstrap_pkg,abi,page_size,min_api);
 
   uint32_t sh_n=0,pkg_n=0,motd_n=0,busybox_n=0,proot_n=0;
   if(load_file("bootstrap_src/common/bin/sh", sh_buf, &sh_n)!=0) return 8;
@@ -45,7 +51,7 @@ int main(int argc,char**argv){
 
   const char* marker="BUILD_ONLY=1\nRUNTIME_READY=0\n";
   uint32_t build_only_n=(uint32_t)snprintf((char*)build_only_buf,sizeof(build_only_buf),"%s",marker);
-  E e[]={{"BOOTSTRAP_INFO",(uint8_t*)info,(uint32_t)info_n,0,0},{"BUILD_ONLY",build_only_buf,build_only_n,0,0},{"bin/sh",sh_buf,sh_n,0,0},{"bin/pkg",pkg_buf,pkg_n,0,0},{"bin/busybox",busybox_buf,busybox_n,0,0},{"bin/proot",proot_buf,proot_n,0,0},{"etc/motd",motd_buf,motd_n,0,0}};
+  E e[]={{"BOOTSTRAP_INFO",(uint8_t*)info,(uint32_t)info_n,0,0},{"SYMLINKS.txt",symlinks_buf,0,0,0},{"BUILD_ONLY",build_only_buf,build_only_n,0,0},{"bin/sh",sh_buf,sh_n,0,0},{"bin/pkg",pkg_buf,pkg_n,0,0},{"bin/busybox",busybox_buf,busybox_n,0,0},{"bin/proot",proot_buf,proot_n,0,0},{"etc/motd",motd_buf,motd_n,0,0}};
   const int n_entries=(int)(sizeof(e)/sizeof(e[0]));
 
   crc32_init(); for(int i=0;i<n_entries;i++) e[i].crc=crc32_calc(e[i].data,e[i].size);
