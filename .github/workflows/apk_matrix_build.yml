@@ -59,6 +59,10 @@ on:
         description: Upload generated local signing keystore
         type: boolean
         default: false
+      use_official_signing:
+        description: Use OFFICIAL_* signing secrets (fallbacks to local validation key if unavailable)
+        type: boolean
+        default: false
 
 jobs:
   build-apk-matrix:
@@ -79,7 +83,25 @@ jobs:
       - name: Validate lowlevel bootstrap spec sync
         run: ./scripts/bootstrap_lowlevel_sync_check.sh
 
+      - name: Prepare optional official signing keystore
+        if: ${{ inputs.use_official_signing }}
+        env:
+          OFFICIAL_RELEASE_KEYSTORE_B64: ${{ secrets.OFFICIAL_RELEASE_KEYSTORE_B64 }}
+        run: |
+          if [ -z "${OFFICIAL_RELEASE_KEYSTORE_B64}" ]; then
+            echo "OFFICIAL_RELEASE_KEYSTORE_B64 not configured; using local validation keystore."
+            exit 0
+          fi
+          mkdir -p dist
+          echo "${OFFICIAL_RELEASE_KEYSTORE_B64}" | base64 --decode > dist/official-release.keystore
+          echo "OFFICIAL_KEYSTORE_READY=1" >> "$GITHUB_ENV"
+
       - name: Build signed + unsigned APK matrix
+        env:
+          KEYSTORE_PATH: ${{ env.OFFICIAL_KEYSTORE_READY == '1' && 'dist/official-release.keystore' || '' }}
+          KEY_ALIAS: ${{ env.OFFICIAL_KEYSTORE_READY == '1' && secrets.OFFICIAL_RELEASE_KEY_ALIAS || '' }}
+          STORE_PASS: ${{ env.OFFICIAL_KEYSTORE_READY == '1' && secrets.OFFICIAL_RELEASE_STORE_PASSWORD || '' }}
+          KEY_PASS: ${{ env.OFFICIAL_KEYSTORE_READY == '1' && secrets.OFFICIAL_RELEASE_KEY_PASSWORD || '' }}
         run: ./scripts/build_apk_matrix.sh
 
       - name: Publish APK size report in workflow summary

@@ -138,3 +138,11 @@ Steps:
 
 No GitHub Actions, execute o workflow manual `APK Matrix Build (signed + unsigned)` para gerar e publicar artefatos em `dist/apk-matrix/`.
 
+Para trilha oficial assinada no workflow, habilite `use_official_signing=true` e configure os secrets:
+
+- `OFFICIAL_RELEASE_KEYSTORE_B64`
+- `OFFICIAL_RELEASE_KEY_ALIAS`
+- `OFFICIAL_RELEASE_STORE_PASSWORD`
+- `OFFICIAL_RELEASE_KEY_PASSWORD`
+
+Sem esses secrets, o workflow mantém a trilha de validação interna com keystore local gerada em `dist/local-release.keystore`.

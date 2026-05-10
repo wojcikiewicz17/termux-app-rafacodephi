@@ -5,7 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${ROOT_DIR}/dist/apk-matrix"
 UNSIGNED_DIR="${OUT_DIR}/unsigned"
 SIGNED_DIR="${OUT_DIR}/signed"
-KEYSTORE_PATH="${ROOT_DIR}/dist/local-release.keystore"
+DEFAULT_KEYSTORE_PATH="${ROOT_DIR}/dist/local-release.keystore"
+KEYSTORE_PATH="${KEYSTORE_PATH:-${DEFAULT_KEYSTORE_PATH}}"
 KEY_ALIAS="${KEY_ALIAS:-localrelease}"
 KEY_PASS="${KEY_PASS:-changeit}"
 STORE_PASS="${STORE_PASS:-changeit}"
@@ -43,10 +44,16 @@ arm32_count=$(find "${UNSIGNED_DIR}" -maxdepth 1 -type f -name '*armeabi-v7a*.ap
 [[ "${arm64_count}" -gt 0 ]] || fail "arm64-v8a APK was not generated"
 [[ "${arm32_count}" -gt 0 ]] || fail "armeabi-v7a APK was not generated"
 
-info "Preparing local signing material"
-if [[ ! -f "${KEYSTORE_PATH}" ]]; then
-  keytool -genkeypair -v -storetype JKS -keystore "${KEYSTORE_PATH}" -alias "${KEY_ALIAS}" -keyalg RSA -keysize 2048 -validity 3650 -storepass "${STORE_PASS}" -keypass "${KEY_PASS}" -dname "CN=Local Build,O=Termux,C=US"
+if [[ "${KEYSTORE_PATH}" == "${DEFAULT_KEYSTORE_PATH}" ]]; then
+  info "Preparing local validation signing material"
+  if [[ ! -f "${KEYSTORE_PATH}" ]]; then
+    keytool -genkeypair -v -storetype JKS -keystore "${KEYSTORE_PATH}" -alias "${KEY_ALIAS}" -keyalg RSA -keysize 2048 -validity 3650 -storepass "${STORE_PASS}" -keypass "${KEY_PASS}" -dname "CN=Local Build,O=Termux,C=US"
+  fi
+else
+  info "Using provided signing keystore at ${KEYSTORE_PATH}"
 fi
+
+[[ -f "${KEYSTORE_PATH}" ]] || fail "keystore file not found at ${KEYSTORE_PATH}"
 
 BUILD_TOOLS_VERSION="$(awk -F= '/^buildToolsVersion=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' gradle.properties || true)"
 [[ -n "${BUILD_TOOLS_VERSION}" ]] || BUILD_TOOLS_VERSION="$(awk -F= '/^compileSdkVersion=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' gradle.properties).0.0"
@@ -98,6 +105,7 @@ done
 ( cd "${OUT_DIR}" && {
   echo "artifact_dir=${OUT_DIR}";
   echo "generated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)";
+  echo "signing_keystore=$(basename "${KEYSTORE_PATH}")";
   echo "signed_release_apks=${signed_arm64_count}+${signed_arm32_count} (arm64+arm32 validated)";
   find unsigned signed -type f -name '*.apk' | sort;
 } > ARTIFACT_MANIFEST.txt )
