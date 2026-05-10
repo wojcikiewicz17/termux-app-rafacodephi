@@ -35,7 +35,8 @@ android {
     def apkVersionTag = System.getenv("TERMUX_APK_VERSION_TAG") ?: ""
     def splitAPKsForDebugBuilds = System.getenv("TERMUX_SPLIT_APKS_FOR_DEBUG_BUILDS") ?: "1"
     def splitAPKsForReleaseBuilds = System.getenv("TERMUX_SPLIT_APKS_FOR_RELEASE_BUILDS") ?: "0" // F-Droid does not support split APKs #1904
-
+    def requestedReleaseBuild = gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") }
+    def baremetalStrictValue = System.getenv("TERMUX_BOOTSTRAP_BAREMETAL_STRICT") ?: (requestedReleaseBuild ? "true" : "false")
 
     defaultConfig {
         applicationId project.ext.appPackageName
@@ -53,6 +54,7 @@ android {
         buildConfigField "String", "BOOTSTRAP_BLAKE3_ARM", "\"" + project.ext.bootstrapBlake3Arm + "\""
         buildConfigField "String", "BOOTSTRAP_BLAKE3_I686", "\"" + project.ext.bootstrapBlake3I686 + "\""
         buildConfigField "String", "BOOTSTRAP_BLAKE3_X86_64", "\"" + project.ext.bootstrapBlake3X8664 + "\""
+        buildConfigField "boolean", "BOOTSTRAP_BAREMETAL_STRICT", baremetalStrictValue
 
         manifestPlaceholders.TERMUX_PACKAGE_NAME = project.ext.appPackageName
         manifestPlaceholders.TERMUX_APP_NAME = "Termux RAFCODEΦ"
