@@ -33,15 +33,25 @@ for path in "${required[@]}"; do
   fi
 done
 
-if ! rg -q "SEM HEAP \| SEM MALLOC" "${SPEC_FILE}"; then
+search_in_file() {
+  local pattern="$1"
+  local file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "$pattern" "$file"
+  else
+    grep -Eq "$pattern" "$file"
+  fi
+}
+
+if ! search_in_file "SEM HEAP \| SEM MALLOC" "${SPEC_FILE}"; then
   fail "Spec header marker not found in BOOTSTRAP_LOWLEVEL_RAFAELIA.txt"
 fi
-if ! rg -q "SEÇÃO 1 — TIPOS PRIMITIVOS" "${SPEC_FILE}"; then
+if ! search_in_file "SEÇÃO 1 — TIPOS PRIMITIVOS" "${SPEC_FILE}"; then
   fail "Spec section marker not found in BOOTSTRAP_LOWLEVEL_RAFAELIA.txt"
 fi
 
 # Ensure release matrix follows canonical ABI policy.
-rg -q "abi_policy_required_array" scripts/build_apk_matrix.sh || fail "build_apk_matrix.sh must consume canonical ABI policy"
+search_in_file "abi_policy_required_array" scripts/build_apk_matrix.sh || fail "build_apk_matrix.sh must consume canonical ABI policy"
 
 if [[ "$missing" -ne 0 ]]; then
   fail "Lowlevel bootstrap references are out of sync."
