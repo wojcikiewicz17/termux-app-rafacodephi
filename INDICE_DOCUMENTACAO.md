@@ -102,6 +102,8 @@ Este documento serve como índice mestre de toda a documentação do projeto Ter
 | [docs/DEPENDENCIAS_TOTAIS.md](docs/DEPENDENCIAS_TOTAIS.md) | Inventário completo de dependências e repositórios | Desenvolvedores |
 | [docs/STATUS.md](docs/STATUS.md) | Status oficial e consolidado | Desenvolvedores |
 | [docs/ENGINEERING_SYSTEM_RUNBOOK.md](docs/ENGINEERING_SYSTEM_RUNBOOK.md) | Runbook canônico de build/release/CI | Engenharia de Build/Release |
+| [docs/RAFAELIA_CONCEPT_CARRY_MAP.md](docs/RAFAELIA_CONCEPT_CARRY_MAP.md) | Contrato de leitura dos conceitos toroidais, 42 ciclos, Hz/memória, multilíngue e política SDK/ABI | IA/Desenvolvedores |
+| [docs/RAFAELIA_CROSS_ARCH_CORRECTION_MATRIX.md](docs/RAFAELIA_CROSS_ARCH_CORRECTION_MATRIX.md) | Matriz de correção para laboratório multi-arquitetura sem acoplar ao APK | Desenvolvedores low-level |
 
 ### Subdiretório `/docs/rafaelia/`
 

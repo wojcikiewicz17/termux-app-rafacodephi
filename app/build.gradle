@@ -470,8 +470,10 @@ tasks.register("validateRewrittenBootstraps") {
 }
 
 tasks.register("buildDeveloperBootstraps", Exec) {
+    description = 'Compiles RAFCODEΦ local bootstrap zip artifacts for CI/developer builds.'
+    group = 'build setup'
     workingDir rootProject.projectDir
-    commandLine "bash", "scripts/generate_developer_bootstraps.sh"
+    commandLine "bash", "scripts/build_rafaelia_bootstraps.sh"
 }
 
 
@@ -492,7 +494,11 @@ task verifyBootstrapZipsPresent {
         def missing = requiredZips.findAll { !new File(projectDir, it).exists() }
         if (!missing.isEmpty()) {
             throw new GradleException('Missing required bootstrap zip artifacts:\n - ' + missing.join('\n - ') +
-                '\nRun :app:downloadBootstraps to generate them before native build tasks.')
+                '\nRun :app:ensureBootstrapArchives to compile or download them before native build tasks.')
+        }
+
+        requiredZips.each { path ->
+            requiredBootstrapMetadata(new File(projectDir, path), project.ext.bootstrapMetadataPackageName, project.ext.bootstrapRequiredPageSize, "strict")
         }
 
     }
@@ -526,7 +532,7 @@ tasks.register("validateBootstrapBlake3Config") {
     }
 }
 tasks.register("ensureBootstrapArchives") {
-    description = 'Downloads and validates all bootstrap zip artifacts required by native bootstrap ASM embedding.'
+    description = 'Compiles/downloads and validates all bootstrap zip artifacts required by native bootstrap ASM embedding.'
     group = 'build setup'
     def useDevBootstrap = (project.findProperty("RAF_BOOTSTRAP_SOURCE") ?: System.getenv("RAF_BOOTSTRAP_SOURCE") ?: "").toString().toLowerCase() == "local"
     dependsOn(useDevBootstrap ? tasks.named("buildDeveloperBootstraps") : tasks.named("validateRewrittenBootstraps"))

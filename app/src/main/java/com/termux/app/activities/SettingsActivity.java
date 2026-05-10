@@ -66,6 +66,7 @@ public class SettingsActivity extends AppCompatActivity {
                 public void run() {
                     configureAndroid15WizardPreference(context);
                     configureSystemAuditPreference(context);
+                    configureIndustrialDiagnosticsPreference(context);
                     configureTermuxAPIPreference(context);
                     configureTermuxFloatPreference(context);
                     configureTermuxTaskerPreference(context);
@@ -92,6 +93,18 @@ public class SettingsActivity extends AppCompatActivity {
             if (auditPreference != null) {
                 auditPreference.setOnPreferenceClickListener(preference -> {
                     Intent intent = new Intent(context, SystemAuditActivity.class);
+                    startActivity(intent);
+                    return true;
+                });
+            }
+        }
+
+        private void configureIndustrialDiagnosticsPreference(@NonNull Context context) {
+            Preference diagnosticsPreference = findPreference("industrial_diagnostics");
+            if (diagnosticsPreference != null) {
+                diagnosticsPreference.setOnPreferenceClickListener(preference -> {
+                    Intent intent = new Intent(context, SystemAuditActivity.class);
+                    intent.putExtra(SystemAuditActivity.EXTRA_FOCUS_INDUSTRIAL_DIAGNOSTICS, true);
                     startActivity(intent);
                     return true;
                 });

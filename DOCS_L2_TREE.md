@@ -14,6 +14,8 @@
 - **Runtime Android**: side-by-side package, compatibilidade Android 12+ (phantom process) e 15/16.
 - **Benchmarks Industriais Vectra**: medição reprodutível de CPU, memória, I/O, latência, jitter, cold/warm start, ABI, tamanho de APK, ELF/page-size, JNI, C/ASM e estabilidade runtime.
 - **Documentação & Auditoria**: inventários, auditorias por módulo e guias técnicos.
+- **Contrato Conceitual RAFAELIA**: mapa de transporte semântico para `T^7`, 42 ciclos, Hz/memória, multilíngue, integridade e política SDK/ABI.
+- **Laboratório Cross-Arch Isolado**: correções RV32/macOS/MIPS/LoongArch/s390x/PPC em `tools/rafaelia_cross_arch/`, fora do caminho do APK.
 
 ## L2 — Árvore operacional mínima (o “tree L2”)
 
@@ -24,7 +26,7 @@
   └─ ./scripts/diagnose.sh
 
 [Release Local]
-  ├─ eval "$(./scripts/prepare_bootstrap_env.sh --print-env)"
+  ├─ eval "$(./scripts/prepare_bootstrap_env.sh --print-env)"  # compila bootstraps RAFCODEΦ locais por padrão
   ├─ ./scripts/build_release_artifacts.sh
   └─ ./scripts/build_apk_matrix.sh
 

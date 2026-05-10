@@ -19,6 +19,12 @@
         app:persistent="false"/>
 
     <Preference
+        app:key="industrial_diagnostics"
+        app:title="@string/industrial_diagnostics_title"
+        app:summary="@string/industrial_diagnostics_summary"
+        app:persistent="false"/>
+
+    <Preference
         app:key="termux_api"
         app:title="@string/termux_api_preferences_title"
         app:summary="@string/termux_api_preferences_summary"

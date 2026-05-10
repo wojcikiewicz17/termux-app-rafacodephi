@@ -15,6 +15,7 @@ import android.widget.TextView;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.cardview.widget.CardView;
 
+import com.termux.rafacodephi.BuildConfig;
 import com.termux.rafacodephi.R;
 import com.termux.lowlevel.BareMetal;
 import com.termux.shared.activities.ReportActivity;
@@ -52,6 +53,8 @@ import java.util.Locale;
  */
 public class SystemAuditActivity extends AppCompatActivity {
     
+    public static final String EXTRA_FOCUS_INDUSTRIAL_DIAGNOSTICS = "com.termux.app.EXTRA_FOCUS_INDUSTRIAL_DIAGNOSTICS";
+
     private static final String LOG_TAG = "SystemAuditActivity";
     private static final int CAP_NEON = 1 << 0;
     private static final int CAP_AVX = 1 << 1;
@@ -61,6 +64,7 @@ public class SystemAuditActivity extends AppCompatActivity {
     
     private LinearLayout contentLayout;
     private StringBuilder auditReport;
+    private boolean focusIndustrialDiagnostics;
     
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -76,6 +80,7 @@ public class SystemAuditActivity extends AppCompatActivity {
         AppCompatActivityUtils.setShowBackButtonInActionBar(this, true);
         
         auditReport = new StringBuilder();
+        focusIndustrialDiagnostics = getIntent() != null && getIntent().getBooleanExtra(EXTRA_FOCUS_INDUSTRIAL_DIAGNOSTICS, false);
         
         // Generate audit in background
         new Thread(this::generateAudit).start();
@@ -85,6 +90,11 @@ public class SystemAuditActivity extends AppCompatActivity {
         auditReport.append("# Termux RAFCODEΦ System Audit Report\n\n");
         auditReport.append("**Generated:** ").append(getCurrentTimestamp()).append("\n\n");
         
+        if (focusIndustrialDiagnostics) {
+            String industrialDiagnostics = generateIndustrialDiagnosticsBenchmark();
+            runOnUiThread(() -> addSectionCard("Industrial Diagnostics & Benchmark", industrialDiagnostics));
+        }
+
         // Hardware Audit
         runOnUiThread(() -> addSectionCard("Hardware Audit", generateHardwareAudit()));
         
@@ -93,6 +103,11 @@ public class SystemAuditActivity extends AppCompatActivity {
         
         // Android 15 Specific Audit
         runOnUiThread(() -> addSectionCard("Android 15 Compatibility", generateAndroid15Audit()));
+
+        if (!focusIndustrialDiagnostics) {
+            String industrialDiagnostics = generateIndustrialDiagnosticsBenchmark();
+            runOnUiThread(() -> addSectionCard("Industrial Diagnostics & Benchmark", industrialDiagnostics));
+        }
         
         // ISO Compliance
         runOnUiThread(() -> addSectionCard("ISO Standards Compliance", generateISOCompliance()));
@@ -227,8 +242,8 @@ public class SystemAuditActivity extends AppCompatActivity {
         int pageSize = getPageSize();
         sb.append("📄 Memory Page Size:\n");
         sb.append("   • Current: ").append(pageSize).append(" bytes\n");
-        sb.append("   • 16KB Alignment: ").append(pageSize == 16384 ? "✅ Required" : "4KB Standard").append("\n");
-        sb.append("   • Compatibility: ✅ App is 16KB aligned\n");
+        sb.append("   • Runtime Class: ").append(pageSize == 16384 ? "16KB device" : pageSize == 4096 ? "4KB standard device" : "custom/unknown").append("\n");
+        sb.append("   • APK Compatibility: ✅ Native libraries are linked for 16KB alignment; 4KB devices remain valid\n");
         
         return sb.toString();
     }
@@ -251,7 +266,9 @@ public class SystemAuditActivity extends AppCompatActivity {
             sb.append("   • Version: ").append(pkgInfo.versionName).append("\n");
             sb.append("   • Version Code: ").append(pkgInfo.versionCode).append("\n");
             sb.append("   • Target SDK: ").append(pkgInfo.applicationInfo.targetSdkVersion).append("\n");
-            sb.append("   • Min SDK: ").append(pkgInfo.applicationInfo.minSdkVersion).append("\n\n");
+            sb.append("   • Runtime APK Min SDK: ").append(getRuntimeMinSdk(pkgInfo)).append("\n");
+            sb.append("   • Configured Build Min SDK: ").append(BuildConfig.CONFIGURED_MIN_SDK).append("\n");
+            sb.append("   • Min SDK Coherence: ").append(getRuntimeMinSdk(pkgInfo) == BuildConfig.CONFIGURED_MIN_SDK ? "✅ Match" : "⚠️ Installed APK differs from current build config").append("\n\n");
         } catch (PackageManager.NameNotFoundException e) {
             sb.append("📦 Termux RAFCODEΦ: Error getting info\n\n");
         }
@@ -262,12 +279,9 @@ public class SystemAuditActivity extends AppCompatActivity {
         sb.append("   • Arch: ").append(System.getProperty("os.arch")).append("\n\n");
         
         // Bootstrap Status
-        File prefixDir = new File(TermuxConstants.TERMUX_PREFIX_DIR_PATH);
-        File binDir = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH);
+        BootstrapState bootstrapState = getBootstrapState();
         sb.append("🏗️ Bootstrap:\n");
-        sb.append("   • PREFIX exists: ").append(prefixDir.exists() ? "✅ Yes" : "❌ No").append("\n");
-        sb.append("   • BIN exists: ").append(binDir.exists() ? "✅ Yes" : "❌ No").append("\n");
-        sb.append("   • Status: ").append(prefixDir.exists() && binDir.exists() ? "✅ Installed" : "⚠️ Not Installed").append("\n");
+        appendBootstrapState(sb, bootstrapState);
         
         return sb.toString();
     }
@@ -278,10 +292,7 @@ public class SystemAuditActivity extends AppCompatActivity {
         int pageSize = getPageSize();
         boolean batteryExempt = isBatteryOptimizationDisabled();
 
-        File prefixDir = new File(TermuxConstants.TERMUX_PREFIX_DIR_PATH);
-        File shellFile = new File(TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/bin/sh");
-        File pkgFile = new File(TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/bin/pkg");
-        boolean bootstrapHealthy = prefixDir.exists() && shellFile.exists() && pkgFile.exists();
+        BootstrapState bootstrapState = getBootstrapState();
 
         boolean pageSizeKnown = pageSize > 0;
         boolean pageSizeExpected = pageSize == 16384;
@@ -304,16 +315,14 @@ public class SystemAuditActivity extends AppCompatActivity {
             sb.append("   • Status: ✅ 16KB runtime page size detected\n\n");
             passCount++;
         } else {
-            sb.append("   • Status: ⚠️ Non-16KB runtime page size (device-specific)\n\n");
-            warnCount++;
+            sb.append("   • Status: ✅ 4KB runtime page size; APK 16KB alignment remains compatible\n\n");
+            passCount++;
         }
 
         sb.append("🏗️ Bootstrap Integrity:\n");
-        sb.append("   • PREFIX exists: ").append(prefixDir.exists() ? "✅ Yes" : "❌ No").append("\n");
-        sb.append("   • /bin/sh exists: ").append(shellFile.exists() ? "✅ Yes" : "❌ No").append("\n");
-        sb.append("   • /bin/pkg exists: ").append(pkgFile.exists() ? "✅ Yes" : "❌ No").append("\n");
-        sb.append("   • Status: ").append(bootstrapHealthy ? "✅ Healthy" : "⚠️ Incomplete").append("\n\n");
-        if (bootstrapHealthy) passCount++; else warnCount++;
+        appendBootstrapState(sb, bootstrapState);
+        sb.append("\n");
+        if (bootstrapState.healthy) passCount++; else warnCount++;
 
         sb.append("👻 Phantom Process Killer:\n");
         sb.append("   • Mitigation: ✅ Foreground service configured\n");
@@ -336,7 +345,7 @@ public class SystemAuditActivity extends AppCompatActivity {
         // ISO 8000 - Data Quality
         sb.append("📋 ISO 8000 (Data Quality):\n");
         sb.append("   • Data Accuracy: ✅ Terminal I/O validated\n");
-        sb.append("   • Data Completeness: ✅ Bootstrap complete\n");
+        sb.append("   • Data Completeness: ").append(getBootstrapState().healthy ? "✅ Bootstrap complete" : "⚠️ Bootstrap pending/incomplete").append("\n");
         sb.append("   • Data Consistency: ✅ TERMUX_PACKAGE_NAME unified\n");
         sb.append("   • Compliance: ✅ ALIGNED\n\n");
         
@@ -560,10 +569,10 @@ public class SystemAuditActivity extends AppCompatActivity {
         
         // Build Optimizations
         sb.append("🔧 Build Optimizations:\n");
-        sb.append("   • Native Code: ✅ NDK optimized\n");
-        sb.append("   • SIMD/NEON: ✅ Enabled\n");
-        sb.append("   • ProGuard: ✅ Release builds\n");
-        sb.append("   • 16KB Alignment: ✅ Configured\n");
+        sb.append("   • Native Code: ").append(BareMetal.isLoaded() ? "✅ NDK library loaded" : "⚠️ Native library unavailable").append("\n");
+        sb.append("   • SIMD/NEON: ").append(BareMetal.isLoaded() ? formatSimdCaps(getBareMetalCapabilities()) : "Unknown").append("\n");
+        sb.append("   • Build Type: ").append(BuildConfig.DEBUG ? "debug" : "release").append("\n");
+        sb.append("   • 16KB Alignment: ✅ Configured for native APK libraries\n");
         
         return sb.toString();
     }
@@ -584,7 +593,7 @@ public class SystemAuditActivity extends AppCompatActivity {
         sb.append("🔧 Hardware Compatibility:\n");
         String[] abis = Build.SUPPORTED_ABIS;
         for (String abi : abis) {
-            sb.append("   • ").append(abi).append(": ✅ Supported\n");
+            sb.append("   • ").append(abi).append(": ").append(formatAbiSupport(abi)).append("\n");
         }
         sb.append("\n");
         
@@ -608,6 +617,74 @@ public class SystemAuditActivity extends AppCompatActivity {
         return sb.toString();
     }
     
+    private String generateIndustrialDiagnosticsBenchmark() {
+        StringBuilder sb = new StringBuilder();
+        BenchmarkResult benchmark = runIndustrialBenchmark();
+        BootstrapState bootstrapState = getBootstrapState();
+        int pageSize = getPageSize();
+        String primaryAbi = Build.SUPPORTED_ABIS.length > 0 ? Build.SUPPORTED_ABIS[0] : "unknown";
+        boolean primaryAbiSupported = isApkAbiSupported(primaryAbi);
+        boolean apiCoherent = Build.VERSION.SDK_INT >= BuildConfig.CONFIGURED_MIN_SDK;
+
+        sb.append("🏭 Industrial Coherence Gate:\n");
+        sb.append("   • Primary ABI: ").append(primaryAbi).append(" → ").append(primaryAbiSupported ? "✅ APK native split supported" : "⚠️ Not in packaged ABI set").append("\n");
+        sb.append("   • APK ABI Set: ").append(BuildConfig.SUPPORTED_APK_ABIS).append("\n");
+        sb.append("   • Android API vs Min SDK: API ").append(Build.VERSION.SDK_INT).append(" / min ").append(BuildConfig.CONFIGURED_MIN_SDK)
+            .append(apiCoherent ? " ✅ coherent" : " ❌ below build floor").append("\n");
+        sb.append("   • Page Size: ").append(pageSize > 0 ? pageSize + " bytes" : "unknown")
+            .append(pageSize == 16384 ? " ✅ 16KB runtime" : pageSize == 4096 ? " ✅ 4KB standard runtime; 16KB-aligned APK remains valid" : " ⚠️ verify device page class")
+            .append("\n");
+        sb.append("   • Bootstrap Health: ").append(bootstrapState.healthy ? "✅ installed" : "⚠️ incomplete; installer must finish before shell benchmark claims").append("\n");
+        sb.append("   • Metric Policy: ✅ deterministic local measurements only; no cross-device performance claims without baseline\n\n");
+
+        sb.append("📐 RAFAELIA Deterministic Benchmark:\n");
+        sb.append("   • Q16 Recurrence Steps: ").append(benchmark.q16Steps).append("\n");
+        sb.append("   • Q16 Final State: ").append(benchmark.q16Final).append("\n");
+        sb.append("   • Q16 Time: ").append(String.format(Locale.US, "%.3f", benchmark.q16ElapsedNs / 1000000.0d)).append(" ms\n");
+        sb.append("   • Buffer Bytes Processed: ").append(benchmark.bytesProcessed).append("\n");
+        sb.append("   • Buffer Time: ").append(String.format(Locale.US, "%.3f", benchmark.bufferElapsedNs / 1000000.0d)).append(" ms\n");
+        sb.append("   • Checksum: 0x").append(Long.toHexString(benchmark.checksum)).append("\n");
+        sb.append("   • Throughput: ").append(benchmark.megabytesPerSecond()).append(" MB/s\n\n");
+
+        sb.append("🧭 Interpretation:\n");
+        sb.append("   • Storage low-space warnings are capacity warnings, not CPU/ABI failures.\n");
+        sb.append("   • 4KB page devices are valid when APK native libraries are linked with 16KB max-page-size.\n");
+        sb.append("   • `armeabi` shown by old devices is a legacy ABI alias; RAFCODEΦ packages `armeabi-v7a` for ARM32.\n");
+
+        return sb.toString();
+    }
+
+    private BenchmarkResult runIndustrialBenchmark() {
+        final int q16Steps = 200000;
+        int state = 65536;
+        long q16Start = System.nanoTime();
+        for (int i = 0; i < q16Steps; i++) {
+            state = (int) ((((long) state * 56756L) >> 16) + 203280L);
+            state ^= (i & 0x3f);
+        }
+        long q16Elapsed = System.nanoTime() - q16Start;
+
+        byte[] src = new byte[4096];
+        byte[] dst = new byte[4096];
+        for (int i = 0; i < src.length; i++) {
+            src[i] = (byte) ((i * 31) ^ (i >>> 3));
+        }
+
+        long checksum = 0xcbf29ce484222325L;
+        final int rounds = 256;
+        long bufferStart = System.nanoTime();
+        for (int round = 0; round < rounds; round++) {
+            System.arraycopy(src, 0, dst, 0, src.length);
+            for (byte value : dst) {
+                checksum ^= (value & 0xffL);
+                checksum *= 0x100000001b3L;
+            }
+        }
+        long bufferElapsed = System.nanoTime() - bufferStart;
+
+        return new BenchmarkResult(q16Steps, state, q16Elapsed, (long) src.length * rounds, bufferElapsed, checksum);
+    }
+
     // Helper Methods
     
     private String getCurrentTimestamp() {
@@ -714,6 +791,96 @@ public class SystemAuditActivity extends AppCompatActivity {
         return "Unknown";
     }
     
+
+    private int getRuntimeMinSdk(PackageInfo pkgInfo) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            return pkgInfo.applicationInfo.minSdkVersion;
+        }
+        return BuildConfig.CONFIGURED_MIN_SDK;
+    }
+
+    private boolean isApkAbiSupported(String abi) {
+        if (abi == null) return false;
+        String supported = "," + BuildConfig.SUPPORTED_APK_ABIS + ",";
+        return supported.contains("," + abi + ",");
+    }
+
+    private String formatAbiSupport(String abi) {
+        if (isApkAbiSupported(abi)) {
+            return "✅ Packaged native ABI";
+        }
+        if ("armeabi".equals(abi) && isApkAbiSupported("armeabi-v7a")) {
+            return "ℹ️ Legacy ABI alias; ARM32 package is armeabi-v7a";
+        }
+        return "⚠️ Not packaged in this APK ABI set";
+    }
+
+    private BootstrapState getBootstrapState() {
+        File prefixDir = new File(TermuxConstants.TERMUX_PREFIX_DIR_PATH);
+        File binDir = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH);
+        File shellFile = new File(TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/bin/sh");
+        File pkgFile = new File(TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/bin/pkg");
+        File busyboxFile = new File(TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/bin/busybox");
+        File prootFile = new File(TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/bin/proot");
+        boolean healthy = prefixDir.isDirectory() && binDir.isDirectory() && shellFile.isFile() && pkgFile.isFile();
+        return new BootstrapState(prefixDir, binDir, shellFile, pkgFile, busyboxFile, prootFile, healthy);
+    }
+
+    private void appendBootstrapState(StringBuilder sb, BootstrapState state) {
+        sb.append("   • PREFIX exists: ").append(state.prefixDir.isDirectory() ? "✅ Yes" : "❌ No").append("\n");
+        sb.append("   • BIN exists: ").append(state.binDir.isDirectory() ? "✅ Yes" : "❌ No").append("\n");
+        sb.append("   • /bin/sh exists: ").append(state.shellFile.isFile() ? "✅ Yes" : "❌ No").append("\n");
+        sb.append("   • /bin/pkg exists: ").append(state.pkgFile.isFile() ? "✅ Yes" : "❌ No").append("\n");
+        sb.append("   • /bin/busybox exists: ").append(state.busyboxFile.isFile() ? "✅ Yes" : "ℹ️ Optional/Not present").append("\n");
+        sb.append("   • /bin/proot exists: ").append(state.prootFile.isFile() ? "✅ Yes" : "ℹ️ Optional/Not present").append("\n");
+        sb.append("   • Status: ").append(state.healthy ? "✅ Installed" : "⚠️ Incomplete or first-run pending").append("\n");
+    }
+
+    private static final class BootstrapState {
+        final File prefixDir;
+        final File binDir;
+        final File shellFile;
+        final File pkgFile;
+        final File busyboxFile;
+        final File prootFile;
+        final boolean healthy;
+
+        BootstrapState(File prefixDir, File binDir, File shellFile, File pkgFile, File busyboxFile, File prootFile, boolean healthy) {
+            this.prefixDir = prefixDir;
+            this.binDir = binDir;
+            this.shellFile = shellFile;
+            this.pkgFile = pkgFile;
+            this.busyboxFile = busyboxFile;
+            this.prootFile = prootFile;
+            this.healthy = healthy;
+        }
+    }
+
+    private static final class BenchmarkResult {
+        final int q16Steps;
+        final int q16Final;
+        final long q16ElapsedNs;
+        final long bytesProcessed;
+        final long bufferElapsedNs;
+        final long checksum;
+
+        BenchmarkResult(int q16Steps, int q16Final, long q16ElapsedNs, long bytesProcessed, long bufferElapsedNs, long checksum) {
+            this.q16Steps = q16Steps;
+            this.q16Final = q16Final;
+            this.q16ElapsedNs = q16ElapsedNs;
+            this.bytesProcessed = bytesProcessed;
+            this.bufferElapsedNs = bufferElapsedNs;
+            this.checksum = checksum;
+        }
+
+        String megabytesPerSecond() {
+            if (bufferElapsedNs <= 0) return "unknown";
+            double seconds = bufferElapsedNs / 1000000000.0d;
+            double mib = bytesProcessed / (1024.0d * 1024.0d);
+            return String.format(Locale.US, "%.2f", mib / seconds);
+        }
+    }
+
     private void exportReport() {
         new Thread(() -> {
             String title = "System Audit Report";

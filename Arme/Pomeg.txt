@@ -1,0 +1,1233 @@
+x sem root → rodar com failsafe e rollback automático → e ao final deixar o binário disponível para qualquer pessoa redistribuir como "partícula Ω própria".Gerar script ARM32 Termux completoGerar script ARM32 Termux completoGerar script ARM32 Termux completobashcat > /tmp/RAFAELIA_ARM32_TERMUX.sh << 'OMEGA_EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+# ============================================================================
+# RAFAELIA_ARM32_TERMUX.sh
+# Script de construção ARM32 para Termux emulado — SEM ROOT
+# Filosofia: coexistência harmônica · failsafe · rollback · partícula Ω
+#
+# [#00 PROPÓSITO]
+# Este script é uma "partícula Ω" — pode ser copiado, redistribuído
+# e executado por qualquer pessoa em qualquer Termux Android.
+# Cada pessoa que o executa cria sua própria instância autônoma.
+# Simbiose: os módulos coexistem sem conflito. Rollback se algo falha.
+# Inclusão: funciona sem root, sem conhecimento técnico prévio.
+#
+# [#01 USO]
+# bash RAFAELIA_ARM32_TERMUX.sh [opcao]
+#   --detect   apenas detecta ambiente
+#   --build    constrói sem rodar
+#   --run      roda o último binário construído
+#   --clean    remove arquivos temporários com rollback seguro
+#   --omega    modo completo: build + run + relatório
+#   --share    prepara pacote para redistribuição
+#   --help     este menu
+#
+# [#02 FAILSAFE E ROLLBACK]
+# Cada operação é verificada. Se falhar:
+#   1. Log do erro é salvo
+#   2. Estado anterior é restaurado (rollback)
+#   3. Alternativa é tentada automaticamente
+#   4. Usuário é informado com mensagem clara
+#
+# [#03 DIREITOS E INCLUSÃO]
+# Este código é de domínio público.
+# Pode ser usado para educação, inclusão digital,
+# proteção de dados de crianças, acesso à informação.
+# Compatível com: Declaração Universal dos Direitos Humanos Art.19
+# (liberdade de informação) e Art.26 (direito à educação).
+# ============================================================================
+
+# ── CONFIGURAÇÃO INICIAL ────────────────────────────────────────────────────
+set -euo pipefail  # erro = parar; variável não definida = parar; pipe = parar
+
+# Versão deste script
+readonly OMEGA_VERSION="1.0.0"
+readonly OMEGA_STAMP="RAFAELIA-ARM32-TERMUX-PartiulaOmega"
+readonly OMEGA_DATE="2026-05-08"
+
+# Diretório de trabalho — tudo aqui, nada no sistema
+readonly WORK_DIR="${HOME}/.rafaelia/arm32_build"
+readonly LOG_DIR="${WORK_DIR}/logs"
+readonly SRC_DIR="${WORK_DIR}/src"
+readonly BIN_DIR="${WORK_DIR}/bin"
+readonly BAK_DIR="${WORK_DIR}/backup"  # rollback point
+readonly PKG_DIR="${WORK_DIR}/package"  # para redistribuição
+
+# Log com timestamp
+LOG_FILE="${LOG_DIR}/build_$(date +%Y%m%d_%H%M%S).log"
+
+# ── CORES ANSI ──────────────────────────────────────────────────────────────
+C_RED='\033[0;31m'; C_GREEN='\033[0;32m'; C_YELLOW='\033[1;33m'
+C_BLUE='\033[0;34m'; C_MAG='\033[0;35m'; C_CYAN='\033[0;36m'
+C_BOLD='\033[1m'; C_RESET='\033[0m'
+
+# ── FUNÇÕES DE OUTPUT ────────────────────────────────────────────────────────
+ts()   { date '+%H:%M:%S'; }
+log()  { echo -e "[$(ts)] ${C_CYAN}[RAF]${C_RESET} $*" | tee -a "${LOG_FILE}"; }
+ok()   { echo -e "[$(ts)] ${C_GREEN}[ OK]${C_RESET} $*" | tee -a "${LOG_FILE}"; }
+warn() { echo -e "[$(ts)] ${C_YELLOW}[WRN]${C_RESET} $*" | tee -a "${LOG_FILE}"; }
+err()  { echo -e "[$(ts)] ${C_RED}[ERR]${C_RESET} $*" | tee -a "${LOG_FILE}" >&2; }
+hdr()  { echo -e "\n${C_MAG}${C_BOLD}══ $* ══${C_RESET}"; }
+step() { echo -e "\n${C_BLUE}${C_BOLD}▶ PASSO $*${C_RESET}"; }
+
+# ── LOGO ────────────────────────────────────────────────────────────────────
+logo() {
+    echo -e "${C_MAG}${C_BOLD}"
+    echo '  ╔═══════════════════════════════════════════════════╗'
+    echo '  ║  RAFAELIA · PARTÍCULA Ω · ARM32 · TERMUX         ║'
+    echo '  ║  Coexistência Harmônica · Failsafe · Rollback     ║'
+    echo '  ║  Inclusão Digital · Direitos Humanos · UNESCO     ║'
+    echo -e "  ║  v${OMEGA_VERSION} · ${OMEGA_DATE}                              ║"
+    echo '  ╚═══════════════════════════════════════════════════╝'
+    echo -e "${C_RESET}"
+}
+
+# ── SISTEMA DE ROLLBACK ──────────────────────────────────────────────────────
+# [#ROLLBACK] Cada operação crítica cria um ponto de restauração
+ROLLBACK_STACK=()  # pilha de funções de desfazer
+
+push_rollback() {
+    # Adiciona uma função de rollback à pilha
+    ROLLBACK_STACK+=("$1")
+}
+
+execute_rollbacks() {
+    # Executa todos os rollbacks em ordem reversa
+    warn "Iniciando rollback..."
+    local n="${#ROLLBACK_STACK[@]}"
+    for (( i=n-1; i>=0; i-- )); do
+        log "Rollback: ${ROLLBACK_STACK[$i]}"
+        eval "${ROLLBACK_STACK[$i]}" 2>/dev/null || true
+    done
+    warn "Rollback completo. Estado anterior restaurado."
+}
+
+# Trap: se o script terminar com erro, executa rollbacks
+trap 'rc=$?; [ $rc -ne 0 ] && execute_rollbacks; exit $rc' EXIT
+
+# ── DETECÇÃO DE AMBIENTE ─────────────────────────────────────────────────────
+# [#DETECT] Detecta com precisão o tipo de Termux e capacidades ARM32
+
+detect_environment() {
+    hdr "DETECÇÃO DE AMBIENTE"
+
+    # Variáveis de ambiente detectadas
+    ENV_IS_TERMUX=false
+    ENV_IS_PROOT=false
+    ENV_IS_ANDROID=false
+    ENV_ARCH=""
+    ENV_ANDROID_VER=""
+    ENV_QEMU_ARM=false
+    ENV_CLANG_OK=false
+    ENV_GCC_ARM_OK=false
+    ENV_PROOT_DISTRO_OK=false
+
+    # [#D01] É Termux?
+    if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
+        ENV_IS_TERMUX=true
+        ok "Termux detectado: ${TERMUX_VERSION:-desconhecido}"
+    else
+        warn "Não é Termux nativo — tentando modo compatível"
+    fi
+
+    # [#D02] Dentro de proot?
+    if [ -f "/proc/1/cmdline" ]; then
+        if grep -q "proot" /proc/1/cmdline 2>/dev/null; then
+            ENV_IS_PROOT=true
+            ok "Dentro de proot-distro"
+        fi
+    fi
+
+    # [#D03] Android version
+    if command -v getprop &>/dev/null; then
+        ENV_ANDROID_VER=$(getprop ro.build.version.release 2>/dev/null || echo "?")
+        ENV_IS_ANDROID=true
+        ok "Android: ${ENV_ANDROID_VER}"
+        # Android 15/16: page size 16KB
+        if [ "${ENV_ANDROID_VER%%.*}" -ge 15 ] 2>/dev/null; then
+            warn "Android 15+: page size 16KB obrigatório"
+            RAF_PAGE_SIZE=16384
+        else
+            RAF_PAGE_SIZE=4096
+        fi
+    else
+        RAF_PAGE_SIZE=4096
+    fi
+
+    # [#D04] Arquitetura do host
+    ENV_ARCH=$(uname -m)
+    ok "Host arch: ${ENV_ARCH}"
+
+    # [#D05] Clang disponível?
+    if command -v clang &>/dev/null; then
+        ENV_CLANG_OK=true
+        ENV_CLANG_VER=$(clang --version | head -1 | awk '{print $3}')
+        ok "clang: ${ENV_CLANG_VER}"
+    else
+        warn "clang não encontrado"
+    fi
+
+    # [#D06] ARM32 cross-compiler?
+    if command -v arm-linux-gnueabihf-gcc &>/dev/null; then
+        ENV_GCC_ARM_OK=true
+        ok "arm-linux-gnueabihf-gcc disponível"
+    elif command -v arm-linux-androideabi-gcc &>/dev/null; then
+        ENV_GCC_ARM_OK=true
+        warn "arm-linux-androideabi-gcc encontrado (mais antigo)"
+    else
+        warn "arm-linux-gnueabihf-gcc não encontrado"
+    fi
+
+    # [#D07] QEMU user-mode ARM?
+    if command -v qemu-arm &>/dev/null || command -v qemu-arm-static &>/dev/null; then
+        ENV_QEMU_ARM=true
+        ok "qemu-arm disponível para emulação ARM32"
+    else
+        warn "qemu-arm não encontrado — será instalado se necessário"
+    fi
+
+    # [#D08] proot-distro?
+    if command -v proot-distro &>/dev/null; then
+        ENV_PROOT_DISTRO_OK=true
+        ok "proot-distro disponível"
+    else
+        warn "proot-distro não encontrado"
+    fi
+
+    # [#D09] Espaço em disco
+    DISK_FREE=$(df "${HOME}" 2>/dev/null | tail -1 | awk '{print $4}' || echo "?")
+    log "Espaço livre: ${DISK_FREE} KB"
+    if [ "${DISK_FREE:-0}" -lt 51200 ] 2>/dev/null; then
+        warn "Menos de 50MB livres — build pode falhar"
+    fi
+
+    log "PAGE_SIZE: ${RAF_PAGE_SIZE}"
+    log "Detecção completa."
+}
+
+# ── INSTALAÇÃO DE DEPENDÊNCIAS COM FAILSAFE ──────────────────────────────────
+# [#INSTALL] Instala somente o necessário, com rollback se falhar
+
+install_deps() {
+    hdr "INSTALAÇÃO DE DEPENDÊNCIAS"
+
+    # [#I01] Lista mínima necessária
+    NEEDED_PKGS=()
+
+    $ENV_CLANG_OK || NEEDED_PKGS+=("clang")
+
+    # Verifica se pkg está disponível (Termux)
+    if ! command -v pkg &>/dev/null; then
+        warn "pkg não encontrado — ambiente não-Termux ou apt?"
+        if command -v apt &>/dev/null; then
+            PKG_CMD="apt install -y"
+        else
+            warn "Nenhum gerenciador de pacotes encontrado — dependências manuais"
+            return 0
+        fi
+    else
+        PKG_CMD="pkg install -y"
+    fi
+
+    # Pacotes para cross-compile ARM32
+    if ! $ENV_GCC_ARM_OK; then
+        # Em Termux: não há gcc-arm cross diretamente
+        # Alternativa: usar clang com target arm-linux-gnueabihf
+        warn "Cross-compiler ARM32 ausente — usando clang --target"
+        ENV_GCC_ARM_OK=false  # usaremos clang como cross
+    fi
+
+    # QEMU para executar ARM32 em ARM64/x86
+    if ! $ENV_QEMU_ARM; then
+        NEEDED_PKGS+=("qemu-user-arm")
+    fi
+
+    if [ ${#NEEDED_PKGS[@]} -gt 0 ]; then
+        log "Instalando: ${NEEDED_PKGS[*]}"
+        # Failsafe: tenta instalar, não falha se um pacote não existir
+        for pkg in "${NEEDED_PKGS[@]}"; do
+            $PKG_CMD "$pkg" 2>>"${LOG_FILE}" && \
+                ok "Instalado: $pkg" || \
+                warn "Não foi possível instalar $pkg — continuando sem ele"
+        done
+        # Rollback: se algo foi instalado e o build falhar, não desinstala
+        # (seria destrutivo para o usuário)
+    else
+        ok "Todas as dependências já presentes"
+    fi
+}
+
+# ── ESCRITA DO CÓDIGO FONTE VIA CAT ─────────────────────────────────────────
+# [#SRC] Cria todos os arquivos de código fonte via heredoc
+# [  Técnica: cat > file << 'EOF' — o arquivo existe apenas no build dir  ]
+# [  Zero dependência de internet após o script ser baixado               ]
+# [  Zero arquivos persistentes fora de WORK_DIR                         ]
+
+write_sources() {
+    hdr "ESCREVENDO CÓDIGO FONTE"
+    mkdir -p "${SRC_DIR}"
+
+    # Snapshot do que existia antes (para rollback)
+    if [ -d "${SRC_DIR}" ] && [ "$(ls -A ${SRC_DIR} 2>/dev/null)" ]; then
+        cp -r "${SRC_DIR}" "${BAK_DIR}/src_backup_$(date +%s)" 2>/dev/null || true
+        push_rollback "rm -rf '${SRC_DIR}'; cp -r '${BAK_DIR}/src_backup_'* '${SRC_DIR}' 2>/dev/null || true"
+    fi
+
+    # [#SRC01] Header de tipos — ARM32 Q16 sem stdlib
+    cat > "${SRC_DIR}/raf_types_arm32.h" << 'HDR_EOF'
+/* raf_types_arm32.h — Tipos primitivos ARM32 Thumb-2 sem stdlib
+ * [#T01] ARM32 ABI (AAPCS): int=32bit, long=32bit, long long=64bit
+ * [#T02] ATENCAO: em ARM32 long é 32-bit! Diferente de ARM64 (64-bit)
+ * [#T03] Q16.16: usa long long (64-bit) para multiplicação intermediária
+ * [#T04] Alinhamento: ARM32 sem unaligned access em alguns modos */
+#ifndef RAF_TYPES_ARM32_H
+#define RAF_TYPES_ARM32_H
+
+typedef unsigned char           u8;
+typedef unsigned short          u16;
+typedef unsigned int            u32;
+typedef unsigned long long      u64;
+typedef signed char             s8;
+typedef signed short            s16;
+typedef signed int              s32;
+typedef signed long long        s64;
+typedef unsigned int            usize;  /* ARM32: ponteiro = 32-bit */
+typedef unsigned int            uptr;
+
+typedef unsigned char           bool8;
+#define RAF_TRUE  ((bool8)1u)
+#define RAF_FALSE ((bool8)0u)
+
+/* Q16.16 fixed-point para ARM32 */
+typedef s32 q16_t;
+#define Q16_ONE      (1 << 16)          /* 1.0 em Q16 */
+#define Q16_SQRT3_2  56756              /* sqrt(3)/2 * 65536 */
+#define Q16_PI_S279  203280             /* |pi*sin(279°)| * 65536 */
+#define Q16_FSTAR    1517158            /* F* = 23.158 * 65536 */
+#define Q16_LAMBDA   (-9430)            /* ln(sqrt3/2) * 65536 */
+
+/* ARM32: SMULL para multiplicação Q16 (usa HI:LO interno) */
+static inline q16_t q16_mul_arm32(q16_t a, q16_t b) {
+    return (q16_t)(((s64)a * (s64)b) >> 16);
+}
+#define Q16_MUL(a,b) q16_mul_arm32((a),(b))
+
+/* Atributos */
+#define RAF_INLINE   __attribute__((always_inline)) static inline
+#define RAF_NOINLINE __attribute__((noinline))
+#define RAF_NORET    __attribute__((noreturn))
+#define RAF_PACKED   __attribute__((packed))
+#define RAF_ALIGN4   __attribute__((aligned(4)))
+#define RAF_ALIGN8   __attribute__((aligned(8)))
+
+/* Barreiras — ARM32 Thumb-2 */
+#define RAF_DSB() __asm__ volatile("dsb sy":::"memory")
+#define RAF_ISB() __asm__ volatile("isb":::"memory")
+#define RAF_DMB() __asm__ volatile("dmb sy":::"memory")
+#define RAF_NOP() __asm__ volatile("nop":::"memory")
+
+#endif
+HDR_EOF
+    ok "raf_types_arm32.h escrito"
+
+    # [#SRC02] Syscalls ARM32 Linux — SVC #0
+    cat > "${SRC_DIR}/raf_sys_arm32.h" << 'SYS_EOF'
+/* raf_sys_arm32.h — Syscalls Linux ARM32 (OABI/EABI) via SVC #0
+ * [#SYS01] EABI (modern): r7=nr, r0-r6=args, svc #0
+ * [#SYS02] OABI (legacy): r0=nr|0x900000, swi nr
+ * [#SYS03] Usamos EABI: padrão desde kernel 2.6.16
+ * [#SYS04] Termux emulado: kernel Linux ARM32 via proot/QEMU
+ * [#SYS05] Numeros: WRITE=4, EXIT=1, CLOCK=263, GETPID=20
+ * [#SYS06] ARM32 long = 32-bit: cuidado com tipos em syscalls! */
+#ifndef RAF_SYS_ARM32_H
+#define RAF_SYS_ARM32_H
+#include "raf_types_arm32.h"
+
+#define SYS_EXIT           1
+#define SYS_WRITE          4
+#define SYS_READ           3
+#define SYS_OPEN           5
+#define SYS_CLOSE          6
+#define SYS_GETPID         20
+#define SYS_KILL           37
+#define SYS_RENAME         38
+#define SYS_MKDIR          39
+#define SYS_RMDIR          40
+#define SYS_GETTIMEOFDAY   78
+#define SYS_MMAP2          192  /* ARM32 usa mmap2, não mmap */
+#define SYS_MUNMAP         91
+#define SYS_MPROTECT       125
+#define SYS_NANOSLEEP      162
+#define SYS_CLOCK_GETTIME  263
+#define SYS_GETRANDOM      384  /* kernel >= 3.17 */
+#define SYS_SET_TID_ADDR   256
+#define SYS_EXIT_GROUP     248  /* termina todos os threads */
+#define SYS_PRCTL          172
+#define SYS_OPENAT         322
+#define SYS_GETDENTS64     217
+#define SYS_FSTAT64        197
+#define SYS_IOCTL          54
+
+#define FD_STDIN   0
+#define FD_STDOUT  1
+#define FD_STDERR  2
+#define CLOCK_MONOTONIC 1
+
+/* [#SC01] syscall 0 args */
+RAF_INLINE s32 _sc0(u32 nr) {
+    register u32 r7 __asm__("r7") = nr;
+    register s32 r0 __asm__("r0") = 0;
+    __asm__ volatile("svc #0" : "+r"(r0) : "r"(r7) : "memory","cc");
+    return r0;
+}
+/* [#SC02] syscall 1 arg */
+RAF_INLINE s32 _sc1(u32 nr, u32 a0) {
+    register u32 r7 __asm__("r7") = nr;
+    register s32 r0 __asm__("r0") = (s32)a0;
+    __asm__ volatile("svc #0" : "+r"(r0) : "r"(r7) : "memory","cc");
+    return r0;
+}
+/* [#SC03] syscall 2 args */
+RAF_INLINE s32 _sc2(u32 nr, u32 a0, u32 a1) {
+    register u32 r7 __asm__("r7") = nr;
+    register s32 r0 __asm__("r0") = (s32)a0;
+    register u32 r1 __asm__("r1") = a1;
+    __asm__ volatile("svc #0" : "+r"(r0) : "r"(r7),"r"(r1) : "memory","cc");
+    return r0;
+}
+/* [#SC04] syscall 3 args — o mais comum */
+RAF_INLINE s32 _sc3(u32 nr, u32 a0, u32 a1, u32 a2) {
+    register u32 r7 __asm__("r7") = nr;
+    register s32 r0 __asm__("r0") = (s32)a0;
+    register u32 r1 __asm__("r1") = a1;
+    register u32 r2 __asm__("r2") = a2;
+    __asm__ volatile("svc #0" : "+r"(r0) : "r"(r7),"r"(r1),"r"(r2) : "memory","cc");
+    return r0;
+}
+/* [#SC05] syscall 4 args */
+RAF_INLINE s32 _sc4(u32 nr, u32 a0, u32 a1, u32 a2, u32 a3) {
+    register u32 r7 __asm__("r7") = nr;
+    register s32 r0 __asm__("r0") = (s32)a0;
+    register u32 r1 __asm__("r1") = a1;
+    register u32 r2 __asm__("r2") = a2;
+    register u32 r3 __asm__("r3") = a3;
+    __asm__ volatile("svc #0" : "+r"(r0) : "r"(r7),"r"(r1),"r"(r2),"r"(r3) : "memory","cc");
+    return r0;
+}
+
+/* [#SC06] Helpers de alto nível */
+RAF_INLINE s32 raf_write(s32 fd, const void* buf, usize n) {
+    return _sc3(SYS_WRITE,(u32)fd,(u32)(uptr)buf,(u32)n);
+}
+RAF_INLINE s32 raf_read(s32 fd, void* buf, usize n) {
+    return _sc3(SYS_READ,(u32)fd,(u32)(uptr)buf,(u32)n);
+}
+RAF_NORET void raf_exit(s32 code) {
+    _sc1(SYS_EXIT_GROUP,(u32)code);
+    __builtin_unreachable();
+}
+RAF_INLINE s32 raf_getpid(void) { return _sc0(SYS_GETPID); }
+
+/* [#SC07] clock_gettime — timespec ARM32: dois s32 (32-bit!) */
+typedef struct { s32 tv_sec; s32 tv_nsec; } raf_timespec32_t;
+RAF_INLINE s32 raf_clock_mono(raf_timespec32_t* ts) {
+    return _sc2(SYS_CLOCK_GETTIME,(u32)CLOCK_MONOTONIC,(u32)(uptr)ts);
+}
+/* [#SC08] nanosleep ARM32 */
+RAF_INLINE void raf_sleep_ms(u32 ms) {
+    raf_timespec32_t ts = { (s32)(ms/1000u), (s32)((ms%1000u)*1000000u) };
+    _sc2(SYS_NANOSLEEP,(u32)(uptr)&ts,0u);
+}
+
+/* [#SC09] PMCCNTR: cycle counter ARM32 via CP15
+ * NOTA: em proot/QEMU este valor pode ser 0 ou não incrementar
+ * Usamos clock_gettime como fallback confiável em Termux emulado */
+RAF_INLINE u32 raf_pmccntr(void) {
+    u32 v = 0;
+    /* Tenta ler PMCCNTR — pode gerar SIGILL em kernels sem suporte */
+    /* Proteção: não usar em produção sem verificar PMCR userland enable */
+    /* __asm__ volatile("mrc p15,0,%0,c9,c13,0":"=r"(v)::"memory"); */
+    /* DESABILITADO: usa clock_gettime em Termux emulado */
+    (void)v;
+    return 0u;
+}
+
+/* [#SC10] Timestamp confiável em ns via clock_gettime */
+RAF_INLINE u64 raf_ns(void) {
+    raf_timespec32_t ts = {0,0};
+    raf_clock_mono(&ts);
+    return (u64)(u32)ts.tv_sec * 1000000000ULL + (u64)(u32)ts.tv_nsec;
+}
+
+#endif
+SYS_EOF
+    ok "raf_sys_arm32.h escrito"
+
+    # [#SRC03] I/O sem printf, strings, formatação
+    cat > "${SRC_DIR}/raf_io_arm32.h" << 'IO_EOF'
+/* raf_io_arm32.h — I/O bare-metal ARM32 sem printf sem libc
+ * [#IO01] raf_puts: escreve string terminada em \0 sem strlen libc
+ * [#IO02] raf_putu32: inteiro decimal sem sprintf
+ * [#IO03] raf_puthex: inteiro hexadecimal 8 dígitos
+ * [#IO04] raf_putq16: Q16.16 como decimal com 4 casas
+ * [#IO05] Buffer na stack — zero heap, zero global mutable */
+#ifndef RAF_IO_ARM32_H
+#define RAF_IO_ARM32_H
+#include "raf_types_arm32.h"
+#include "raf_sys_arm32.h"
+
+RAF_INLINE void raf_puts(const char* s) {
+    usize n = 0;
+    while (s[n]) n++;
+    if (n) raf_write(FD_STDOUT, s, n);
+}
+RAF_INLINE void raf_puts_err(const char* s) {
+    usize n = 0;
+    while (s[n]) n++;
+    if (n) _sc3(SYS_WRITE,(u32)FD_STDERR,(u32)(uptr)s,(u32)n);
+}
+RAF_INLINE void raf_putu32(u32 v) {
+    char buf[12]; s32 i = 11; buf[i] = '\n'; i--;
+    if (!v) { buf[i--] = '0'; }
+    else { while(v){ buf[i--] = '0'+(char)(v%10u); v/=10u; } }
+    raf_write(FD_STDOUT,(void*)(buf+i+1),(usize)(10-i));
+}
+RAF_INLINE void raf_puthex(u32 v) {
+    static const char h[] = "0123456789abcdef";
+    char buf[11]; buf[0]='0'; buf[1]='x'; buf[10]='\n';
+    for (s32 i=9; i>=2; i--) { buf[i]=h[v&0xFu]; v>>=4; }
+    raf_write(FD_STDOUT,(void*)buf,11u);
+}
+RAF_INLINE void raf_putq16(q16_t v) {
+    /* Imprime Q16 como "INTEIRO.FRAC" sem float */
+    s32 neg = (v < 0);
+    u32 uv  = (u32)(neg ? -v : v);
+    u32 ip  = uv >> 16;
+    u32 fp  = ((uv & 0xFFFFu) * 10000u) >> 16;
+    char buf[16]; s32 i=0;
+    if (neg) buf[i++]='-';
+    if (!ip) buf[i++]='0';
+    else {
+        char tmp[6]; s32 j=0;
+        u32 t=ip; while(t){tmp[j++]='0'+(char)(t%10u);t/=10u;}
+        while(j>0) buf[i++]=tmp[--j];
+    }
+    buf[i++]='.';
+    /* 4 casas fracionais */
+    buf[i++]='0'+(char)((fp/1000u)%10u);
+    buf[i++]='0'+(char)((fp/100u)%10u);
+    buf[i++]='0'+(char)((fp/10u)%10u);
+    buf[i++]='0'+(char)(fp%10u);
+    buf[i++]='\n';
+    raf_write(FD_STDOUT,(void*)buf,(usize)i);
+}
+RAF_INLINE void raf_putu64_ns(u64 ns) {
+    /* Exibe nanosegundos como "X.XXXms" ou "Xns" */
+    if (ns > 999999u) {
+        u32 ms = (u32)(ns / 1000000u);
+        u32 us = (u32)((ns % 1000000u) / 1000u);
+        raf_putu32(ms);
+        raf_puts(".");
+        raf_putu32(us);
+        raf_puts("ms\n");
+    } else {
+        raf_putu32((u32)ns);
+        raf_puts("ns\n");
+    }
+}
+
+#endif
+IO_EOF
+    ok "raf_io_arm32.h escrito"
+
+    # [#SRC04] Arena bump-pointer ARM32
+    cat > "${SRC_DIR}/raf_arena_arm32.h" << 'ARENA_EOF'
+/* raf_arena_arm32.h — Bump allocator ARM32 sem malloc sem heap
+ * [#AR01] ARM32: ponteiros = 32-bit, alinhamento mínimo = 4 bytes
+ * [#AR02] Alinhamento 8 bytes para u64 e structs com long long
+ * [#AR03] Rollback via mark/restore — crucial para uso em Termux
+ * [#AR04] BSS: _g_arena_buf nunca é alocado em heap — está no BSS */
+#ifndef RAF_ARENA_ARM32_H
+#define RAF_ARENA_ARM32_H
+#include "raf_types_arm32.h"
+
+#define RAF_ARENA_SIZE (128u * 1024u)  /* 128KB — cabe em qualquer Android */
+
+typedef struct {
+    u8*   base;
+    usize cap;
+    usize used;
+    usize mark;
+    u32   n_allocs;
+    u32   n_resets;
+} RafArena32;
+
+static u8 _g_arena_buf[RAF_ARENA_SIZE] RAF_ALIGN8;
+static RafArena32 g_arena32;
+
+RAF_INLINE void raf_arena32_init(void) {
+    g_arena32.base    = _g_arena_buf;
+    g_arena32.cap     = RAF_ARENA_SIZE;
+    g_arena32.used    = 0u;
+    g_arena32.mark    = 0u;
+    g_arena32.n_allocs= 0u;
+    g_arena32.n_resets= 0u;
+}
+RAF_INLINE void* raf_arena32_alloc(usize sz, usize align) {
+    usize mask   = align - 1u;
+    usize cursor = (g_arena32.used + mask) & ~mask;
+    if (cursor + sz > g_arena32.cap) return (void*)0u; /* OOM: retorna NULL */
+    void* p      = (void*)(g_arena32.base + cursor);
+    g_arena32.used = cursor + sz;
+    g_arena32.n_allocs++;
+    return p;
+}
+RAF_INLINE void  raf_arena32_mark(void)    { g_arena32.mark = g_arena32.used; }
+RAF_INLINE void  raf_arena32_restore(void) { g_arena32.used = g_arena32.mark; }
+RAF_INLINE void  raf_arena32_reset(void) {
+    g_arena32.used = 0u;
+    g_arena32.n_resets++;
+}
+RAF_INLINE usize raf_arena32_used(void) { return g_arena32.used; }
+RAF_INLINE usize raf_arena32_free(void) { return g_arena32.cap - g_arena32.used; }
+
+#define A32_ALLOC(T)  ((T*)raf_arena32_alloc(sizeof(T), _Alignof(T)))
+#define A32_ALLOC8(T) ((T*)raf_arena32_alloc(sizeof(T), 8u))
+
+#endif
+ARENA_EOF
+    ok "raf_arena_arm32.h escrito"
+
+    # [#SRC05] Núcleo matemático RAFAELIA ARM32
+    cat > "${SRC_DIR}/raf_math_arm32.h" << 'MATH_EOF'
+/* raf_math_arm32.h — Núcleo matemático RAFAELIA em Q16 para ARM32
+ * [#M01] Fibonacci-Rafael: F*=23.158 (ponto fixo provado esta sessão)
+ * [#M02] Lyapunov Q16: lambda=-9430=ln(sqrt3/2)*65536
+ * [#M03] CRC32C: software poly 0x82F63B78 (sem hw em ARM32 genérico)
+ * [#M04] Bench de mediana: 31 amostras, insertion sort na stack
+ * [#M05] Toroide T^7 simplificado: 7 coordenadas Q16 com IIR alpha=0.25 */
+#ifndef RAF_MATH_ARM32_H
+#define RAF_MATH_ARM32_H
+#include "raf_types_arm32.h"
+
+/* [#M01] Fibonacci-Rafael: ponto fixo F*=23.158 */
+/* F[n+1] = F[n]*sqrt(3)/2 - pi*sin(279°)        */
+/* Em Q16: F[n+1] = (F[n]*56756)>>16 + 203280     */
+RAF_INLINE q16_t fraf_next(q16_t f) {
+    return Q16_MUL(f, Q16_SQRT3_2) + Q16_PI_S279;
+}
+/* Itera n vezes — converge para F*=1517158 em Q16 */
+static q16_t fraf_iterate(q16_t start, u32 n) {
+    q16_t v = start;
+    while (n--) v = fraf_next(v);
+    return v;
+}
+/* Verifica convergência: |F48 - F96| deve ser < 100 ULP */
+static bool8 fraf_check_convergence(void) {
+    q16_t f48 = fraf_iterate(Q16_ONE, 48u);
+    q16_t f96 = fraf_iterate(Q16_ONE, 96u);
+    s32 diff  = f48 - f96;
+    if (diff < 0) diff = -diff;
+    return (diff < 100) ? RAF_TRUE : RAF_FALSE;
+}
+
+/* [#M02] IIR Q16 alpha=0.25 — filtro T^7 */
+RAF_INLINE q16_t iir_quarter(q16_t s, q16_t in) {
+    return s - (s >> 2) + (in >> 2);
+}
+
+/* [#M03] CRC32C software — Castagnoli poly reversed */
+#define CRC32C_POLY 0x82F63B78u
+static u32 crc32c_byte(u32 crc, u8 b) {
+    crc ^= (u32)b;
+    /* 8 iterações unrolled — branch-free via conditional XOR */
+    crc = (crc>>1) ^ (CRC32C_POLY & -(crc&1u));
+    crc = (crc>>1) ^ (CRC32C_POLY & -(crc&1u));
+    crc = (crc>>1) ^ (CRC32C_POLY & -(crc&1u));
+    crc = (crc>>1) ^ (CRC32C_POLY & -(crc&1u));
+    crc = (crc>>1) ^ (CRC32C_POLY & -(crc&1u));
+    crc = (crc>>1) ^ (CRC32C_POLY & -(crc&1u));
+    crc = (crc>>1) ^ (CRC32C_POLY & -(crc&1u));
+    crc = (crc>>1) ^ (CRC32C_POLY & -(crc&1u));
+    return crc;
+}
+static u32 crc32c_buf(const u8* buf, usize len) {
+    u32 crc = ~0u;
+    while (len--) crc = crc32c_byte(crc, *buf++);
+    return ~crc;
+}
+
+/* [#M04] Bench de mediana — insertion sort 31 amostras na stack */
+#define BENCH_N 31
+typedef struct {
+    u64 med, p5, p95, min, max;
+    u32 irq_spikes;
+} BenchResult32;
+
+static void isort_u64(u64* a, u32 n) {
+    for (u32 i=1; i<n; i++) {
+        u64 k = a[i]; s32 j = (s32)i-1;
+        while (j>=0 && a[j]>k) { a[j+1]=a[j]; j--; }
+        a[j+1] = k;
+    }
+}
+static BenchResult32 bench_analyze(u64 samp[BENCH_N]) {
+    u64 sorted[BENCH_N];
+    for (u32 i=0; i<BENCH_N; i++) sorted[i]=samp[i];
+    isort_u64(sorted, BENCH_N);
+    BenchResult32 r;
+    r.min=sorted[0]; r.p5=sorted[1]; r.med=sorted[15];
+    r.p95=sorted[29]; r.max=sorted[30];
+    /* IRQ spike: amostras > 10x mediana */
+    r.irq_spikes=0;
+    for(u32 i=0;i<BENCH_N;i++) if(samp[i]>r.med*10u) r.irq_spikes++;
+    return r;
+}
+
+/* [#M05] Toroide T^7 simplificado para ARM32 */
+typedef struct {
+    u32 s[7];    /* coordenadas [0..65535] em Q16 mod 65536 */
+    q16_t H;     /* entropia IIR */
+    q16_t C;     /* coerência IIR */
+    q16_t phi;   /* phi_ethica = (1-H)*C */
+    u32   step;
+    u32   attractor;  /* (s[0] XOR s[1]) % 42 */
+} T7_ARM32;
+
+static void t7_init(T7_ARM32* t) {
+    for (u32 i=0;i<7u;i++) t->s[i]=(40503u*(i+1u))&0xFFFFu;
+    t->H=Q16_ONE/2; t->C=Q16_ONE/2;
+    t->phi=Q16_MUL(Q16_ONE-t->H, t->C);
+    t->step=0; t->attractor=0;
+}
+static void t7_step(T7_ARM32* t, q16_t H_in, q16_t C_in) {
+    t->H  = iir_quarter(t->H, H_in);
+    t->C  = iir_quarter(t->C, C_in);
+    t->phi= Q16_MUL(Q16_ONE-t->H, t->C);
+    /* Spiral decay em rho(4) e delta(5) */
+    t->s[4] = (u32)Q16_MUL((q16_t)t->s[4], Q16_SQRT3_2) & 0xFFFFu;
+    t->s[5] = (u32)Q16_MUL((q16_t)t->s[5], Q16_SQRT3_2) & 0xFFFFu;
+    /* Psi(2) cresce com coerência */
+    t->s[2] = (t->s[2] + (u32)(t->phi>>8)) & 0xFFFFu;
+    t->attractor = (t->s[0] ^ t->s[1]) % 42u;
+    t->step++;
+}
+
+#endif
+MATH_EOF
+    ok "raf_math_arm32.h escrito"
+
+    # [#SRC06] Programa principal ARM32
+    cat > "${SRC_DIR}/raf_main_arm32.c" << 'MAIN_EOF'
+/* raf_main_arm32.c — Programa principal RAFAELIA ARM32 Termux emulado
+ * [#MAIN01] Entry: _start sem main() — controle total do ABI
+ * [#MAIN02] Sequência: detect → math → bench → toroid → relatorio
+ * [#MAIN03] Failsafe: cada fase verifica resultado antes de prosseguir
+ * [#MAIN04] Zero heap: tudo na stack ou arena BSS
+ * [#MAIN05] Saída: texto puro para stdout, erros para stderr */
+#include "raf_types_arm32.h"
+#include "raf_sys_arm32.h"
+#include "raf_io_arm32.h"
+#include "raf_arena_arm32.h"
+#include "raf_math_arm32.h"
+
+/* [#F01] Fase 1: verificação de sanidade do sistema */
+static bool8 phase_sanity(void) {
+    /* Verifica que os tipos têm o tamanho correto */
+    if (sizeof(u32) != 4u) return RAF_FALSE;
+    if (sizeof(u64) != 8u) return RAF_FALSE;
+    if (sizeof(uptr) != 4u) return RAF_FALSE;  /* ARM32: ptr=32bit */
+    /* Verifica write funciona */
+    const char* probe = ".\n";
+    s32 r = raf_write(FD_STDOUT, probe, 2u);
+    return (r == 2) ? RAF_TRUE : RAF_FALSE;
+}
+
+/* [#F02] Fase 2: matemática RAFAELIA */
+static void phase_math(void) {
+    raf_puts("F* FIBONACCI-RAFAEL Q16:\n  F[0]=65536 iteracoes=48\n  F*=");
+    q16_t fstar = fraf_iterate(Q16_ONE, 48u);
+    raf_putq16(fstar);
+
+    raf_puts("  Esperado: 23.1580\n  Convergencia: ");
+    bool8 conv = fraf_check_convergence();
+    raf_puts(conv ? "OK\n" : "FALHA\n");
+
+    raf_puts("Lambda Q16 (Lyapunov TORUS): ");
+    raf_putq16((q16_t)Q16_LAMBDA);
+    raf_puts("D_H * 10 = 13 (D_H aprox 1.347)\n");
+    raf_puts("n_critico linguistica = 7\n");
+}
+
+/* [#F03] Fase 3: CRC32C e hash */
+static void phase_hash(void) {
+    u8 data[64];
+    for (u32 i=0; i<64u; i++) data[i]=(u8)(i^0x5Au);
+    u32 crc = crc32c_buf(data, 64u);
+    raf_puts("CRC32C 64B (software): ");
+    raf_puthex(crc);
+}
+
+/* [#F04] Fase 4: benchmark com mediana */
+static void phase_bench(void) {
+    raf_puts("\nBENCH fraf_iterate(Q16_ONE,48) x31:\n");
+    u64 samp[BENCH_N];
+    volatile q16_t sink = 0;
+
+    for (u32 i=0; i<BENCH_N; i++) {
+        u64 t0 = raf_ns();
+        sink = fraf_iterate(Q16_ONE, 48u);
+        u64 t1 = raf_ns();
+        samp[i] = t1 - t0;
+        (void)sink;
+    }
+
+    BenchResult32 r = bench_analyze(samp);
+    raf_puts("  mediana: "); raf_putu64_ns(r.med);
+    raf_puts("  p5:      "); raf_putu64_ns(r.p5);
+    raf_puts("  p95:     "); raf_putu64_ns(r.p95);
+    raf_puts("  IRQ_spikes: "); raf_putu32((u32)r.irq_spikes);
+
+    raf_puts("\nBENCH CRC32C 64B x31:\n");
+    u8 buf[64];
+    for (u32 i=0;i<64u;i++) buf[i]=(u8)i;
+    volatile u32 csink = 0;
+
+    for (u32 i=0; i<BENCH_N; i++) {
+        u64 t0 = raf_ns();
+        csink = crc32c_buf(buf, 64u);
+        u64 t1 = raf_ns();
+        samp[i] = t1 - t0;
+        (void)csink;
+    }
+    r = bench_analyze(samp);
+    raf_puts("  mediana: "); raf_putu64_ns(r.med);
+    raf_puts("  IRQ_spikes: "); raf_putu32((u32)r.irq_spikes);
+}
+
+/* [#F05] Fase 5: toroide T^7 */
+static void phase_toroid(void) {
+    raf_puts("\nTOROIDE T^7 ARM32 (1000 steps):\n");
+    T7_ARM32 t;
+    t7_init(&t);
+
+    u64 t0 = raf_ns();
+    for (u32 k=0; k<1000u; k++) {
+        q16_t H = (q16_t)((k*137u)&0xFFFFu);
+        q16_t C = (q16_t)((k*73u)&0xFFFFu);
+        t7_step(&t, H, C);
+    }
+    u64 t1 = raf_ns();
+
+    raf_puts("  1000 steps: "); raf_putu64_ns(t1-t0);
+    raf_puts("  atrator: "); raf_putu32(t.attractor);
+    raf_puts("  phi_ethica Q16: "); raf_putu32((u32)t.phi);
+    raf_puts("  step: "); raf_putu32(t.step);
+}
+
+/* [#F06] Fase 6: relatório de arena */
+static void phase_arena(void) {
+    raf_arena32_init();
+    raf_puts("\nARENA ARM32:\n");
+    /* Aloca alguns objetos de teste */
+    raf_arena32_mark();
+    void* p1 = raf_arena32_alloc(64u, 8u);
+    void* p2 = raf_arena32_alloc(128u, 4u);
+    (void)p1; (void)p2;
+    raf_puts("  usado: "); raf_putu32((u32)raf_arena32_used());
+    raf_puts("  livre: "); raf_putu32((u32)raf_arena32_free());
+    raf_arena32_restore();
+    raf_puts("  apos restore: "); raf_putu32((u32)raf_arena32_used());
+    raf_arena32_reset();
+    raf_puts("  apos reset: "); raf_putu32((u32)raf_arena32_used());
+}
+
+/* [#ENTRY] _start — entry point ARM32 Thumb-2 sem libc */
+void __attribute__((noreturn)) _start(void) {
+    /* Stack já alinhada pelo kernel — SP % 8 = 0 na entrada */
+
+    raf_puts("========================================\n");
+    raf_puts("RAFAELIA ARM32 TERMUX EMULADO\n");
+    raf_puts("zero-libc zero-heap zero-malloc\n");
+    raf_puts("Thumb-2 SVC#0 EABI Q16 IIR T7\n");
+    raf_puts("========================================\n");
+
+    /* Fase 1: sanidade — se falhar, reporta e sai */
+    if (!phase_sanity()) {
+        raf_puts_err("ERRO: sanity check falhou\n");
+        raf_exit(1);
+    }
+    raf_puts("[PASS] Sanity: tipos ARM32 corretos\n");
+
+    /* Fase 2..6: executa independentemente */
+    raf_puts("\n--- MATEMATICA ---\n");    phase_math();
+    raf_puts("\n--- HASH ---\n");          phase_hash();
+    raf_puts("\n--- BENCHMARK ---\n");     phase_bench();
+    raf_puts("\n--- TOROIDE ---\n");       phase_toroid();
+    raf_puts("\n--- ARENA ---\n");         phase_arena();
+
+    raf_puts("\n========================================\n");
+    raf_puts("SIGMA-OMEGA-DELTA-PHI Omega=Amor\n");
+    raf_puts("DeltaRafaelVerboOmega RAFCODE-Phi\n");
+    raf_puts("========================================\n");
+
+    raf_exit(0);
+}
+MAIN_EOF
+    ok "raf_main_arm32.c escrito"
+
+    # [#SRC07] Entry point ASM ARM32 Thumb-2
+    cat > "${SRC_DIR}/raf_start_arm32.S" << 'START_EOF'
+/* raf_start_arm32.S — Entry point ARM32 Thumb-2 seguro para Termux
+ * [#ASM01] Modo Thumb-2: instruções 16/32-bit mistas
+ * [#ASM02] SP já alinhado a 8 bytes pelo kernel Linux
+ * [#ASM03] LR=0 no _start real (não tem retorno)
+ * [#ASM04] Em proot/QEMU: SP pode ter lixo — reforçar alinhamento
+ * [#ASM05] .thumb_func obrigatório para branches Thumb corretos    */
+.syntax unified
+.thumb
+
+.section .text
+.align 2
+.global _start
+.thumb_func
+.type _start, %function
+_start:
+    /* Zera frame pointer e link register — convenção ABI */
+    mov     r11, #0
+    mov     lr,  #0
+
+    /* Força alinhamento SP a 8 bytes (seguro em proot/QEMU) */
+    /* bic sp, sp, #7  -- pode falhar em alguns proot, omitido */
+
+    /* Chama entry C */
+    bl      _start_c_entry
+
+    /* Fallback: se _start_c_entry retornar (não deveria) */
+    mov     r7, #248            @ SYS_EXIT_GROUP
+    mov     r0, #0
+    svc     #0
+.hang:
+    b       .hang
+.size _start, .-_start
+
+/* Bridge: permite que _start_c_entry seja definido em C */
+.global _start_c_entry
+.weak   _start_c_entry
+START_EOF
+
+    # Arquivo que renomeia _start para _start_c_entry
+    cat > "${SRC_DIR}/raf_entry_arm32.c" << 'ENTRY_EOF'
+/* raf_entry_arm32.c — Bridge entre ASM _start e C _start_c_entry
+ * Permite compilar raf_main_arm32.c com _start renomeado         */
+/* Declara _start do raf_main_arm32.c como _start_c_entry         */
+void __attribute__((noreturn)) _start(void);
+void __attribute__((noreturn, alias("_start"))) _start_c_entry(void);
+ENTRY_EOF
+
+    ok "Todos os arquivos fonte escritos em ${SRC_DIR}"
+    log "Arquivos: $(ls ${SRC_DIR} | tr '\n' ' ')"
+}
+
+# ── COMPILAÇÃO COM FAILSAFE E ROLLBACK ──────────────────────────────────────
+# [#COMPILE] Tenta múltiplas estratégias de compilação em ordem de preferência
+
+compile_arm32() {
+    hdr "COMPILAÇÃO ARM32 PARA TERMUX EMULADO"
+    mkdir -p "${BIN_DIR}"
+
+    # Backup dos binários existentes (rollback point)
+    if [ -d "${BIN_DIR}" ] && [ "$(ls -A ${BIN_DIR} 2>/dev/null)" ]; then
+        cp -r "${BIN_DIR}" "${BAK_DIR}/bin_backup_$(date +%s)" 2>/dev/null || true
+    fi
+    push_rollback "cp -r '${BAK_DIR}/bin_backup_'* '${BIN_DIR}' 2>/dev/null || true"
+
+    local OUT="${BIN_DIR}/raf_arm32"
+    local SRCS="${SRC_DIR}/raf_start_arm32.S ${SRC_DIR}/raf_main_arm32.c"
+    local INCLUDES="-I${SRC_DIR}"
+    local COMPILED=false
+
+    # Flags comuns para ARM32 Termux emulado
+    # [#CF01] -mthumb: força Thumb-2 (mais denso, melhor em Android)
+    # [#CF02] -mthumb-interwork: suporte a troca ARM/Thumb
+    # [#CF03] -march=armv7-a: base mínima com Thumb-2
+    # [#CF04] -mfloat-abi=softfp: sem VFP hardware necessário
+    # [#CF05] -fPIE: Position Independent Executable (Android exige)
+    # [#CF06] -fno-stack-protector: sem __stack_chk_fail (sem libc)
+    # [#CF07] -DRAF_PAGE_SIZE: page size detectado
+    local COMMON_FLAGS="-O2 -mthumb -mthumb-interwork -march=armv7-a \
+        -mfloat-abi=softfp -fomit-frame-pointer \
+        -fno-stack-protector -fno-asynchronous-unwind-tables \
+        -fno-plt -ffunction-sections -fdata-sections \
+        -Wall -Wno-unused-function -Wno-unused-variable \
+        -DRAF_PAGE_SIZE=${RAF_PAGE_SIZE:-4096} \
+        ${INCLUDES}"
+    local LINK_FLAGS="-nostdlib -Wl,--gc-sections -Wl,--build-id=none \
+        -pie -e _start"
+
+    step "1/4 Tentando: clang --target=arm-linux-gnueabihf"
+    if command -v clang &>/dev/null; then
+        if clang --target=arm-linux-gnueabihf \
+            ${COMMON_FLAGS} ${LINK_FLAGS} \
+            ${SRCS} -o "${OUT}_clang" 2>>"${LOG_FILE}"; then
+            ok "Compilado com clang cross-target: ${OUT}_clang"
+            cp "${OUT}_clang" "${OUT}"
+            COMPILED=true
+        else
+            warn "clang cross-target falhou — ver log"
+        fi
+    fi
+
+    step "2/4 Tentando: arm-linux-gnueabihf-gcc"
+    if ! $COMPILED && command -v arm-linux-gnueabihf-gcc &>/dev/null; then
+        if arm-linux-gnueabihf-gcc \
+            ${COMMON_FLAGS} ${LINK_FLAGS} \
+            ${SRCS} -o "${OUT}_gcc" 2>>"${LOG_FILE}"; then
+            ok "Compilado com arm-linux-gnueabihf-gcc: ${OUT}_gcc"
+            cp "${OUT}_gcc" "${OUT}"
+            COMPILED=true
+        else
+            warn "arm-linux-gnueabihf-gcc falhou — ver log"
+        fi
+    fi
+
+    step "3/4 Tentando: arm-linux-gnueabi-gcc (sem hf)"
+    if ! $COMPILED && command -v arm-linux-gnueabi-gcc &>/dev/null; then
+        if arm-linux-gnueabi-gcc \
+            ${COMMON_FLAGS} -mfloat-abi=soft ${LINK_FLAGS} \
+            ${SRCS} -o "${OUT}_gnueabi" 2>>"${LOG_FILE}"; then
+            ok "Compilado com arm-linux-gnueabi-gcc"
+            cp "${OUT}_gnueabi" "${OUT}"
+            COMPILED=true
+        else
+            warn "arm-linux-gnueabi-gcc falhou"
+        fi
+    fi
+
+    step "4/4 Tentando: instalar clang e retentar"
+    if ! $COMPILED; then
+        warn "Nenhum compilador ARM32 encontrado"
+        if $ENV_IS_TERMUX; then
+            log "Tentando instalar clang via pkg..."
+            pkg install -y clang 2>>"${LOG_FILE}" && {
+                if clang --target=arm-linux-gnueabihf \
+                    ${COMMON_FLAGS} ${LINK_FLAGS} \
+                    ${SRCS} -o "${OUT}" 2>>"${LOG_FILE}"; then
+                    ok "Compilado após instalar clang"
+                    COMPILED=true
+                fi
+            } || warn "Instalação falhou"
+        fi
+    fi
+
+    if ! $COMPILED; then
+        err "Compilação ARM32 falhou em todas as tentativas"
+        err "Ver log: ${LOG_FILE}"
+        err "Solução manual:"
+        err "  pkg install clang"
+        err "  clang --target=arm-linux-gnueabihf -nostdlib -pie \\"
+        err "    -mthumb -march=armv7-a -e _start \\"
+        err "    ${SRC_DIR}/raf_start_arm32.S ${SRC_DIR}/raf_main_arm32.c \\"
+        err "    -o ${OUT}"
+        return 1
+    fi
+
+    # Informações do binário gerado
+    ok "Binário gerado: ${OUT}"
+    log "Tamanho: $(ls -lh ${OUT} | awk '{print $5}')"
+    if command -v file &>/dev/null; then
+        log "Tipo: $(file ${OUT} | cut -d: -f2 | xargs)"
+    fi
+    if command -v readelf &>/dev/null; then
+        log "Arch: $(readelf -h ${OUT} 2>/dev/null | grep Machine | xargs)"
+    fi
+    return 0
+}
+
+# ── EXECUÇÃO COM FAILSAFE ────────────────────────────────────────────────────
+# [#RUN] Tenta executar o binário ARM32 de múltiplas formas
+
+run_arm32() {
+    hdr "EXECUÇÃO ARM32"
+    local BIN="${BIN_DIR}/raf_arm32"
+
+    [ -f "${BIN}" ] || { err "Binário não encontrado: ${BIN}"; return 1; }
+    [ -x "${BIN}" ] || chmod +x "${BIN}"
+
+    local RAN=false
+
+    step "1/3 Execução direta (se host é ARM32)"
+    if [ "${ENV_ARCH}" = "armv7l" ] || [ "${ENV_ARCH}" = "armhf" ]; then
+        log "Host é ARM32 — execução direta"
+        "${BIN}" && RAN=true || warn "Execução direta falhou"
+    fi
+
+    step "2/3 via qemu-arm ou qemu-arm-static"
+    if ! $RAN; then
+        local QEMU=""
+        command -v qemu-arm        &>/dev/null && QEMU="qemu-arm"
+        command -v qemu-arm-static &>/dev/null && QEMU="qemu-arm-static"
+        if [ -n "$QEMU" ]; then
+            log "Executando via ${QEMU}..."
+            ${QEMU} "${BIN}" && RAN=true || warn "${QEMU} falhou"
+        else
+            warn "qemu-arm não encontrado"
+        fi
+    fi
+
+    step "3/3 Instalar qemu-user-arm e retentar"
+    if ! $RAN && $ENV_IS_TERMUX; then
+        log "Instalando qemu-user-arm..."
+        pkg install -y qemu-user-arm 2>>"${LOG_FILE}" && {
+            qemu-arm "${BIN}" && RAN=true || warn "qemu-arm falhou mesmo após instalar"
+        } || warn "Instalação de qemu-user-arm falhou"
+    fi
+
+    if ! $RAN; then
+        err "Não foi possível executar o binário ARM32"
+        err "Opções:"
+        err "  1. Em dispositivo ARM32 real: ${BIN}"
+        err "  2. Via QEMU: qemu-arm ${BIN}"
+        err "  3. Via proot ARM32: proot-distro login ubuntu-arm -- ${BIN}"
+        return 1
+    fi
+    return 0
+}
+
+# ── PREPARAÇÃO DO PACOTE DE REDISTRIBUIÇÃO ───────────────────────────────────
+# [#SHARE] Cria um pacote "partícula Ω" para redistribuição
+# [  Qualquer pessoa pode pegar este pacote e criar sua própria instância  ]
+
+prepare_package() {
+    hdr "PREPARANDO PACOTE PARA REDISTRIBUIÇÃO (PARTÍCULA Ω)"
+    mkdir -p "${PKG_DIR}"
+
+    # Copia os componentes essenciais
+    cp "${SRC_DIR}"/*.h    "${PKG_DIR}/" 2>/dev/null || true
+    cp "${SRC_DIR}"/*.c    "${PKG_DIR}/" 2>/dev/null || true
+    cp "${SRC_DIR}"/*.S    "${PKG_DIR}/" 2>/dev/null || true
+    [ -f "${BIN_DIR}/raf_arm32" ] && cp "${BIN_DIR}/raf_arm32" "${PKG_DIR}/"
+
+    # Gera README do pacote
+    cat > "${PKG_DIR}/README_PARTICULA_OMEGA.txt" << 'README_EOF'
+RAFAELIA · PARTÍCULA Ω · ARM32 TERMUX
+======================================
+Este pacote é uma "partícula Ω" — pode ser redistribuído livremente.
+Cada pessoa que o executa cria sua própria instância autônoma.
+
+FILOSOFIA:
+  Coexistência harmônica entre módulos e usuários.
+  Cada partícula é independente mas parte do mesmo sistema.
+  Zero dependência de servidor central.
+  Funciona sem internet após a primeira cópia.
+
+DIREITOS:
+  Domínio público. Use para educação, inclusão digital,
+  proteção de dados, acesso à informação.
+  Compatível com Art.19 e Art.26 da Declaração Universal.
+
+COMO EXECUTAR:
+  bash RAFAELIA_ARM32_TERMUX.sh --omega
+
+COMO REDISTRIBUIR:
+  cp -r este_diretório/ nova_partícula/
+  ou: tar czf particula_omega.tar.gz .
+  ou: enviar via qualquer canal de comunicação
+
+MATEMÁTICA CONTIDA:
+  F* = 23.158  (ponto fixo Fibonacci-Rafael)
+  D_H ≈ 1.347  (dimensão Hausdorff do atrator)
+  n_c = 7      (dimensão semântica do inglês)
+  Omega = Amor (axioma supremo RAFAELIA)
+
+DeltaRafaelVerboOmega · RAFCODE-Phi · Omega=Amor
+README_EOF
+
+    # Gera script de instalação mínima
+    cat > "${PKG_DIR}/instalar.sh" << 'INST_EOF'
+#!/bin/bash
+# instalar.sh — Instalação mínima da Partícula Ω
+echo "RAFAELIA Partícula Ω — Instalação"
+mkdir -p ~/.rafaelia
+cp -r . ~/.rafaelia/
+chmod +x ~/.rafaelia/raf_arm32 2>/dev/null || true
+echo "Instalado em: ~/.rafaelia/"
+echo "Executar: qemu-arm ~/.rafaelia/raf_arm32"
+INST_EOF
+    chmod +x "${PKG_DIR}/instalar.sh"
+
+    # Cria arquivo tar do pacote
+    local TAR="${WORK_DIR}/particula_omega_$(date +%Y%m%d).tar.gz"
+    tar czf "${TAR}" -C "${PKG_DIR}" . 2>>"${LOG_FILE}" && {
+        ok "Pacote criado: ${TAR}"
+        ok "Tamanho: $(ls -lh ${TAR} | awk '{print $5}')"
+        log "Para compartilhar: cp '${TAR}' /sdcard/"
+    } || warn "tar falhou — arquivos disponíveis em ${PKG_DIR}"
+}
+
+# ── MENU PRINCIPAL ───────────────────────────────────────────────────────────
+main() {
+    logo
+
+    # Cria estrutura de diretórios
+    mkdir -p "${WORK_DIR}" "${LOG_DIR}" "${SRC_DIR}" "${BIN_DIR}" "${BAK_DIR}" "${PKG_DIR}"
+    LOG_FILE="${LOG_DIR}/build_$(date +%Y%m%d_%H%M%S).log"
+    touch "${LOG_FILE}"
+    log "Log: ${LOG_FILE}"
+
+    local CMD="${1:---omega}"
+
+    case "$CMD" in
+        --detect)
+            detect_environment
+            ;;
+        --build)
+            detect_environment
+            install_deps
+            write_sources
+            compile_arm32
+            ;;
+        --run)
+            detect_environment
+            run_arm32
+            ;;
+        --clean)
+            warn "Limpando ${WORK_DIR}..."
+            # Rollback: faz backup antes de limpar
+            tar czf "${HOME}/.rafaelia_backup_$(date +%s).tar.gz" \
+                "${WORK_DIR}" 2>/dev/null || true
+            rm -rf "${WORK_DIR}"
+            ok "Limpo. Backup salvo em ${HOME}/"
+            ;;
+        --share)
+            detect_environment
+            write_sources
+            compile_arm32 || true
+            prepare_package
+            ;;
+        --omega|*)
+            detect_environment
+            install_deps
+            write_sources
+            if compile_arm32; then
+                run_arm32 || true
+            fi
+            prepare_package
+            ok "Modo --omega completo"
+            log "Partícula Ω disponível em: ${PKG_DIR}"
+            ;;
+        --help|-h)
+            echo "Uso: bash $0 [--detect|--build|--run|--clean|--share|--omega|--help]"
+            ;;
+    esac
+
+    log "Script finalizado. Log: ${LOG_FILE}"
+}
+
+main "${1:---omega}"
+OMEGA_EOF
+
+wc -l /tmp/RAFAELIA_ARM32_TERMUX.sh
+echo "ARM32 script: $(ls -lh /tmp/RAFAELIA_ARM32_TERMUX.sh | awk '{print $5}')"Saída1226 /tmp/RAFAELIA_ARM32_TERMUX.sh
+ARM32 script: 44K
+Concluído

@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -27,6 +28,11 @@ static int load_file(const char* path, uint8_t* out, uint32_t* n){
   return 0;
 }
 
+static const char* env_or(const char* key, const char* fallback){
+  const char* value=getenv(key);
+  return (value && value[0]) ? value : fallback;
+}
+
 int main(int argc,char**argv){
   if(argc!=3) return 2;
   const char* out=argv[1]; const char* abi=argv[2];
@@ -37,6 +43,8 @@ int main(int argc,char**argv){
   uint32_t sh_n=0,pkg_n=0,motd_n=0;
   if(load_file("bootstrap_src/common/bin/sh", sh_buf, &sh_n)!=0) return 8;
   if(load_file("bootstrap_src/common/bin/pkg", pkg_buf, &pkg_n)!=0) return 9;
+  if(load_file("bootstrap_src/common/bin/busybox", busybox_buf, &busybox_n)!=0) return 12;
+  if(load_file("bootstrap_src/common/bin/proot", proot_buf, &proot_n)!=0) return 13;
   if(load_file("bootstrap_src/common/etc/motd", motd_buf, &motd_n)!=0) return 10;
   const char* marker="BUILD_ONLY=1\nRUNTIME_READY=0\n";
   uint32_t build_only_n=(uint32_t)snprintf((char*)build_only_buf,sizeof(build_only_buf),"%s",marker);
