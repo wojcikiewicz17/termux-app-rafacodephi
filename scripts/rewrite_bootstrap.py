@@ -33,6 +33,8 @@ def is_elf(p: Path):
 def is_text(path: Path):
     if path.suffix in TEXT_EXTS or path.name in TEXT_NAMES:
         return True
+    if shutil.which('file') is None:
+        return False
     try:
         out = subprocess.run(['file','--mime-type','-b',str(path)],capture_output=True,text=True,check=False)
         return out.stdout.strip().startswith('text/')
@@ -116,7 +118,10 @@ def main():
         scanned_files += 1
         rel = p.relative_to(staging)
         if is_elf(p):
-            out = subprocess.run(['file',str(p)],capture_output=True,text=True).stdout.strip()
+            if shutil.which('file') is not None:
+                out = subprocess.run(['file',str(p)],capture_output=True,text=True).stdout.strip()
+            else:
+                out = 'ELF (file utility unavailable)'
             elf_lines.append(f'{rel}: {out}')
             hdr = subprocess.run(['readelf','-h',str(p)],capture_output=True,text=True).stdout
             mach_ok = ARCH_MAP.get(args.arch,'') in hdr
@@ -160,10 +165,15 @@ def main():
     bo = staging/'BUILD_ONLY'
     if bo.exists(): bo.write_text('0\n', encoding='utf-8')
 
-    for req in ('bin/sh','bin/pkg'):
-        rp = staging/req
-        if not rp.exists() or is_text(rp):
-            raise SystemExit(f'Missing real runtime binary: {req}')
+    runtime_candidates = {
+        'bin/sh': ('bin/sh', 'usr/bin/sh'),
+        'bin/pkg': ('bin/pkg', 'usr/bin/pkg'),
+    }
+    for req, candidates in runtime_candidates.items():
+        rp = next((staging / c for c in candidates if (staging / c).exists()), None)
+        if rp is None or is_text(rp):
+            joined = ', '.join(candidates)
+            raise SystemExit(f'Missing real runtime binary: {req} (checked: {joined})')
 
     for p in staging.rglob('*'):
         if p.is_file() and is_text(p):
