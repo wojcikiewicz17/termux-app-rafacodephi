@@ -1,0 +1,5 @@
+[build] 00_raf_start_linear_panel.S -> build/00_raf_start_linear_panel.o
+[build] 01_raf_leaf_syscall.S -> build/01_raf_leaf_syscall.o
+[build] 02_raf_q16_leaf.S -> build/02_raf_q16_leaf.o
+[build] 03_raf_hex_blob.S -> build/03_raf_hex_blob.o
+RAF_LINEAR_OBJECTS_OK
