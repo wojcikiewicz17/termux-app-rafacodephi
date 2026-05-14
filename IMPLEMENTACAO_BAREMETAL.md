@@ -25,17 +25,17 @@ Este documento descreve a implementação de programas internos refatorados em C
 Para alinhar com o ecossistema Termux, a referência de pacotes externos segue o repositório oficial [`termux/termux-packages`](https://github.com/termux/termux-packages). A integração proposta mantém o foco em refatoração low-level:
 
 - **C/ASM de baixo nível** para rotinas críticas.
-- **Sem dependências legadas** ou bibliotecas externas adicionais.
+- **Sem dependências legadas no núcleo nativo**; o app Android completo mantém dependências Android/Java no Gradle.
 - **Estruturas de dados matriciais** como base das variáveis (arrays contíguos).
 
 ## Determinismo e Otimização Bare-Metal Interna
 
-As alterações priorizam determinismo e performance com footprint mínimo, mantendo tudo **apenas no núcleo interno** do projeto:
+As alterações priorizam determinismo e performance com footprint mínimo, mantendo foco no **núcleo interno nativo** do projeto (sem confundir com app completo):
 
 - **Sem GC**: uso exclusivo de alocação manual controlada e buffers fixos.
 - **Determinismo**: operações matemáticas e de memória sem efeitos colaterais e com ordem fixa.
 - **Otimizações bare-metal**: acesso direto a arrays contíguos e rotinas inline em C/ASM.
-- **Sem dependências externas**: somente rotinas internas necessárias ao runtime.
+- **Dependências mínimas no core**: libc/libm/liblog no caminho nativo; app completo usa dependências Android/Java.
 
 ## Requisitos Atendidos
 
@@ -86,15 +86,20 @@ Todas as funções têm nomes novos, sem herança de código legado:
 | `bmem_cpy()` | `memcpy()` | Cópia de memória |
 | `bstr_len()` | `strlen()` | Tamanho de string |
 
-### ✅ 5. Sem Dependências Externas
-Dependências mínimas - apenas libc sistema:
+### ✅ 5. Dependências mínimas no core nativo (com ressalvas)
+No core nativo (C/ASM), as dependências são mínimas:
 - `libc`: Funções básicas do sistema (malloc, free)
 - `libm`: Matemática básica (apenas para fallback)
 - `liblog`: Logging do Android
 
-**Tamanho total**: ~50 KB (vs ~5 MB de bibliotecas externas)
+**Tamanho total do core nativo**: ~50 KB (estimativa histórica, depende das flags/ABI).
 
-### ✅ 6. Bare-Metal - Mais Baixo Nível Possível
+> **Nota de escopo importante:** este documento descreve o **core nativo low-level**.
+> O aplicativo Android completo (módulo `app`) usa dependências de ecossistema Android
+> como AndroidX, Material, Guava, Markwon e BouncyCastle via Gradle.
+
+
+### ✅ 6. Low-level em user-space (NDK)
 Implementações bare-metal:
 
 ```c
@@ -340,3 +345,10 @@ CHECKSUM_XOR32_GROUP4=0xF8F8DF32
 ```
 
 Nota de semântica: o campo `AUTHORSHIP_CHECKSUM` no arquivo `.hex` mantém `db 52h, 41h, 46h, 41h` (`"RAFA"`) como assinatura ASCII autoral/ética. O checksum técnico acima (`0xF8F8DF32`) é um valor de integridade computado por XOR-32 em grupos de 4 bytes.
+
+
+## Ajustes de linguagem para manter coerência técnica
+
+- Evitar termos absolutos como **"kernel"**, **"sem malloc absoluto"** e **"sem dependências"** sem contexto.
+- Forma recomendada: **core de política/bootstrap guard em user-space**, com modo opcional `no-malloc` e fallback C.
+- Benchmarks devem ser tratados como hipótese até relatório reproduzível por ABI/dispositivo.
