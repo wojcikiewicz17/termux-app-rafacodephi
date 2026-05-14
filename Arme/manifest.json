@@ -1,0 +1,670 @@
+{
+  "itens": [
+    {
+      "arquivo": "Arme/RAFAELIA_ARKRAF_MASTER.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/RAFAELIA_CODEX_POLIMATA.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/RAFAELIA_ENTERPRISE_BENCH_v3 (1).c",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/RAFAELIA_MASTER_DOC.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/RAFAELIA_ΣΩΔΦBITRAF_MASTER.zip",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": false,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/RAF_GENESIS.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/RAF_PMU_LIVE.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/RAF_STATECOMP.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/arwiteto_script.sh",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/compilador_asm_legacy.sh",
+      "tipo": "legado",
+      "status": "bloqueado",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "alto",
+      "acao_recomendada": "nao usar em pipeline oficial; manter apenas para referencia historica"
+    },
+    {
+      "arquivo": "Arme/compilador_asm_refatorado.sh",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/conceitos_mvp.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/documentacao_tecnica_algoritmos.md",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/engenharia_estado_unificado.md",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/estado_aprendizado_fronteira.md",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/estado_modelo_temporal.md",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/estado_nucleo.md",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/pomeg.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/rafaelia_bare_hardware_v2.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/rafaelia_master.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/rafaelia_sementes_v1.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/readme_profissional.md",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/Add/Android_nomalloc.mk",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/Application.mk",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/Devem.md",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/Add/RAFAELIA_ARKRAF_MASTER.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/Add/RAFAELIA_CODEX_POLIMATA.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/Add/RAFAELIA_MASTER_DOC.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/Add/RAFAELIA_MATH_FORMULAS.md",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/Add/RAF_STATECOMP.txt",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/Add/README.md",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/Add/RafaeliaCore.java",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/baremetal_nomalloc.c",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/baremetal_nomalloc.h",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/bitstack.c",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/bitstack.h",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/build_all.sh",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/diagnose.sh",
+      "tipo": "experimental",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "usar apenas em diagnostico interno"
+    },
+    {
+      "arquivo": "Arme/Add/diagnose_termux.sh",
+      "tipo": "experimental",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "usar apenas em diagnostico interno"
+    },
+    {
+      "arquivo": "Arme/Add/hyperforms.json",
+      "tipo": "referencia",
+      "status": "ativo",
+      "pode_compilar": false,
+      "pode_extrair": true,
+      "risco": "baixo",
+      "acao_recomendada": "usar apenas como referencia documental"
+    },
+    {
+      "arquivo": "Arme/Add/raf_asm_b1.S",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_arena.h",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_b1.S",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_b2.S",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_b3.S",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_b4.S",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_b5.S",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_b6.S",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_b7.S",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_b8.S",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_bitraf.c",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_core.c",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_glue.c",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_gpu_mid.c",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_gpu_mid.h",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_integration.c",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_jni_direct.c",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_master.sh",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_orchestrator.c",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_sigma_omega.c",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/rafaelia_types.h",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    },
+    {
+      "arquivo": "Arme/Add/repo_Android_orig.mk",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/repo_baremetal_jni_orig.c",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/repo_baremetal_orig.S",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/repo_baremetal_orig.c",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/repo_baremetal_orig.h",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/repo_commit_gate.c",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/repo_commit_gate.h",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/repo_gpu_orch.c",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/repo_gpu_orch.h",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/repo_mvp_puro.s",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/repo_toroidal.c",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/repo_toroidal.h",
+      "tipo": "legado",
+      "status": "arquivado",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "preservar para rastreabilidade; evitar novas dependencias"
+    },
+    {
+      "arquivo": "Arme/Add/termux_arm32_build.sh",
+      "tipo": "implementavel",
+      "status": "ativo",
+      "pode_compilar": true,
+      "pode_extrair": true,
+      "risco": "medio",
+      "acao_recomendada": "manter sob validacao de contrato e testes"
+    }
+  ]
+}

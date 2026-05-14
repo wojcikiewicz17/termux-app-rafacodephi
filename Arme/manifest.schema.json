@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rafacodephi.local/Arme/manifest.schema.json",
+  "title": "Arme Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["itens"],
+  "properties": {
+    "itens": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "arquivo",
+          "tipo",
+          "status",
+          "pode_compilar",
+          "pode_extrair",
+          "risco",
+          "acao_recomendada"
+        ],
+        "properties": {
+          "arquivo": { "type": "string", "minLength": 1 },
+          "tipo": {
+            "type": "string",
+            "enum": [
+              "implementavel",
+              "referencia",
+              "legado",
+              "experimental",
+              "documentacao"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["ativo", "bloqueado", "arquivado"]
+          },
+          "pode_compilar": { "type": "boolean" },
+          "pode_extrair": { "type": "boolean" },
+          "risco": { "type": "string", "minLength": 1 },
+          "acao_recomendada": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}
