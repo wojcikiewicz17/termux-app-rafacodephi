@@ -1,3 +1,5 @@
+# ci_track: official
+# ci_abis: armeabi-v7a,arm64-v8a,universal
 name: APK Matrix Build (signed + unsigned)
 
 on:
@@ -60,7 +62,7 @@ on:
         type: boolean
         default: false
       use_official_signing:
-        description: Use OFFICIAL_* signing secrets (fallbacks to local validation key if unavailable)
+        description: Use OFFICIAL_* signing secrets (required for official track)
         type: boolean
         default: false
       release_track:
@@ -90,14 +92,27 @@ jobs:
       - name: Validate lowlevel bootstrap spec sync
         run: ./scripts/bootstrap_lowlevel_sync_check.sh
 
+      - name: Enforce official signing contract
+        if: ${{ inputs.release_track == 'official' }}
+        env:
+          OFFICIAL_RELEASE_KEYSTORE_B64: ${{ secrets.OFFICIAL_RELEASE_KEYSTORE_B64 }}
+          OFFICIAL_RELEASE_KEY_ALIAS: ${{ secrets.OFFICIAL_RELEASE_KEY_ALIAS }}
+          OFFICIAL_RELEASE_STORE_PASSWORD: ${{ secrets.OFFICIAL_RELEASE_STORE_PASSWORD }}
+          OFFICIAL_RELEASE_KEY_PASSWORD: ${{ secrets.OFFICIAL_RELEASE_KEY_PASSWORD }}
+        run: |
+          test -n "${OFFICIAL_RELEASE_KEYSTORE_B64}" || (echo "Missing OFFICIAL_RELEASE_KEYSTORE_B64 for official track" && exit 1)
+          test -n "${OFFICIAL_RELEASE_KEY_ALIAS}" || (echo "Missing OFFICIAL_RELEASE_KEY_ALIAS for official track" && exit 1)
+          test -n "${OFFICIAL_RELEASE_STORE_PASSWORD}" || (echo "Missing OFFICIAL_RELEASE_STORE_PASSWORD for official track" && exit 1)
+          test -n "${OFFICIAL_RELEASE_KEY_PASSWORD}" || (echo "Missing OFFICIAL_RELEASE_KEY_PASSWORD for official track" && exit 1)
+
       - name: Prepare optional official signing keystore
         if: ${{ inputs.use_official_signing }}
         env:
           OFFICIAL_RELEASE_KEYSTORE_B64: ${{ secrets.OFFICIAL_RELEASE_KEYSTORE_B64 }}
         run: |
           if [ -z "${OFFICIAL_RELEASE_KEYSTORE_B64}" ]; then
-            echo "OFFICIAL_RELEASE_KEYSTORE_B64 not configured; using local validation keystore."
-            exit 0
+            echo "OFFICIAL_RELEASE_KEYSTORE_B64 not configured."
+            exit 1
           fi
           mkdir -p dist
           echo "${OFFICIAL_RELEASE_KEYSTORE_B64}" | base64 --decode > dist/official-release.keystore

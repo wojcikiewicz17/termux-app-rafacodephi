@@ -1,3 +1,7 @@
+# ci_track: deprecated
+# ci_abis: armeabi-v7a
+# ci_status: deprecated
+# ci_removal_deadline: 2026-09-30
 name: APK ARM32 Build (signed/unsigned)
 
 on:
