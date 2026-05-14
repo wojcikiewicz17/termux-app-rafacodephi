@@ -170,13 +170,37 @@ def main():
         'shell': ('bin/sh', 'usr/bin/sh', 'bin/bash', 'usr/bin/bash', 'bin/dash', 'usr/bin/dash'),
         'pkg': ('bin/pkg', 'usr/bin/pkg'),
     }
+
+    def resolve_runtime_candidate(path: Path):
+        cur = path
+        seen = set()
+        while cur.is_symlink():
+            if cur in seen:
+                raise SystemExit(f'Symlink loop detected while resolving runtime tool: {path.relative_to(staging)}')
+            seen.add(cur)
+            target = os.readlink(cur)
+            if os.path.isabs(target):
+                target = target.lstrip('/')
+            cur = (cur.parent / target).resolve(strict=False)
+            try:
+                cur.relative_to(staging)
+            except ValueError:
+                raise SystemExit(f'Runtime tool symlink escapes bootstrap root: {path.relative_to(staging)} -> {os.readlink(path)}')
+        return cur if cur.exists() else None
+
     for kind, candidates in runtime_candidates.items():
-        rp = next((staging / c for c in candidates if (staging / c).exists()), None)
-        if rp is None:
+        candidate = next((staging / c for c in candidates if (staging / c).exists() or (staging / c).is_symlink()), None)
+        if candidate is None:
             joined = ', '.join(candidates)
             raise SystemExit(f'Missing runtime tool ({kind}) (checked: {joined})')
-        if kind == 'shell' and not is_elf(rp):
-            raise SystemExit(f'Shell candidate is not a real runtime binary: {rp.relative_to(staging)}')
+        resolved = resolve_runtime_candidate(candidate)
+        if resolved is None:
+            raise SystemExit(f'Runtime tool target missing: {candidate.relative_to(staging)}')
+        if kind == 'shell' and not (is_elf(resolved) or (resolved.is_file() and os.access(resolved, os.X_OK))):
+            raise SystemExit(
+                f'Shell candidate is not executable runtime binary/script: '
+                f'{candidate.relative_to(staging)} -> {resolved.relative_to(staging)}'
+            )
 
     for p in staging.rglob('*'):
         if p.is_file() and is_text(p):
