@@ -1,25 +1,56 @@
-# Build local APK matrix (arm32 + arm64, signed + unsigned)
+# Build APK Matrix (ARM32 + ARM64, signed + unsigned)
+
+## Objetivo
+Executar uma trilha única que:
+1. compila APKs debug/release,
+2. garante ABIs obrigatórias (`armeabi-v7a` e `arm64-v8a`),
+3. assina releases localmente (validação),
+4. valida assinatura,
+5. gera manifest e checksums para auditoria.
+
+## Pré-requisitos
+- JDK compatível com Gradle do projeto.
+- Android SDK/NDK/CMake instaláveis por `scripts/setup_android_toolchain.sh`.
+- Ambiente shell POSIX com `bash`, `awk`, `sed`, `find`, `xargs`, `sha256sum`, `keytool`.
+
+## Execução
 
 ```bash
 ./scripts/build_apk_matrix.sh
 ```
 
-## Output
+## Etapas internas executadas pelo script
 
-Artifacts are generated at `dist/apk-matrix/`:
+1. Provisiona SDK/NDK/CMake (`setup_android_toolchain.sh`).
+2. Carrega hashes BLAKE3 de bootstrap (`prepare_bootstrap_env.sh --print-env`).
+3. Executa testes unitários debug (`:app:testDebugUnitTest`).
+4. Compila `assembleDebug` e `assembleRelease` com split APK habilitado.
+5. Verifica presença de APK por ABI obrigatória.
+6. Assina APKs de release (`apksigner`) em `dist/apk-matrix/signed/`.
+7. Verifica assinatura dos APKs assinados.
+8. Emite relatórios de tamanho e checksums.
 
-- `unsigned/*.apk` (debug/release unsigned artifacts)
-- `signed/*-signed.apk` (locally signed release artifacts)
-- `SHA256SUMS.txt` (checksums for signed and unsigned artifacts)
+## Saídas esperadas
 
-## Guarantees
+Diretório: `dist/apk-matrix/`
 
-- Fails if unsigned `arm64-v8a` or `armeabi-v7a` APK is missing.
-- Fails if signed release `arm64-v8a` or `armeabi-v7a` APK is missing.
-- Verifies signatures with `apksigner verify`.
+- `unsigned/*.apk`
+- `signed/*-signed.apk`
+- `SHA256SUMS.txt`
+- `APK_SIZE_REPORT.tsv`
+- `APK_SIZE_DIFF_RELEASE.tsv`
+- `ARTIFACT_MANIFEST.txt`
 
-## Notes
+## Critérios de falha (hard fail)
 
-- Uses repository toolchain source of truth (`gradle.properties`).
-- Bootstraps SDK/NDK/CMake via `scripts/ci_android_preflight.sh`.
-- Creates a local keystore at `dist/local-release.keystore` if missing.
+- Hash BLAKE3 ausente/inválido para qualquer bootstrap exigido.
+- Falta de APK `armeabi-v7a` ou `arm64-v8a` na saída unsigned.
+- Falta de APK de release assinado para `armeabi-v7a` ou `arm64-v8a`.
+- `apksigner verify` falhar em qualquer release assinado.
+
+## Relação com o CI
+
+No GitHub Actions (`apk_matrix_build.yml`):
+- trilha `official` reforça secrets obrigatórios e assinatura oficial;
+- trilha `internal` permite upload unsigned de release para validação;
+- `verifyReleaseContract` valida contrato antes do upload final.
