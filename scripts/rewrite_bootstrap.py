@@ -30,6 +30,14 @@ def is_elf(p: Path):
     except Exception:
         return False
 
+
+def is_shebang_script(path: Path):
+    try:
+        with path.open('rb') as f:
+            return f.read(2) == b'#!'
+    except Exception:
+        return False
+
 def is_text(path: Path):
     if path.suffix in TEXT_EXTS or path.name in TEXT_NAMES:
         return True
@@ -172,35 +180,50 @@ def main():
     }
 
     def resolve_runtime_candidate(path: Path):
-        cur = path
+        rel_cur = path.relative_to(staging)
         seen = set()
-        while cur.is_symlink():
-            if cur in seen:
+        while True:
+            if rel_cur in seen:
                 raise SystemExit(f'Symlink loop detected while resolving runtime tool: {path.relative_to(staging)}')
-            seen.add(cur)
+            seen.add(rel_cur)
+            cur = staging / rel_cur
+            if not cur.is_symlink():
+                return cur if cur.exists() else None
             target = os.readlink(cur)
             if os.path.isabs(target):
-                target = target.lstrip('/')
-            cur = (cur.parent / target).resolve(strict=False)
-            try:
-                cur.relative_to(staging)
-            except ValueError:
-                raise SystemExit(f'Runtime tool symlink escapes bootstrap root: {path.relative_to(staging)} -> {os.readlink(path)}')
-        return cur if cur.exists() else None
+                next_rel = Path(target.lstrip('/'))
+            else:
+                next_rel = (rel_cur.parent / target)
+            next_rel = Path(os.path.normpath(next_rel.as_posix()))
+            if next_rel.as_posix().startswith('../') or next_rel.as_posix() == '..':
+                raise SystemExit(
+                    f'Runtime tool symlink escapes bootstrap root: '
+                    f'{path.relative_to(staging)} -> {target}'
+                )
+            rel_cur = next_rel
 
     for kind, candidates in runtime_candidates.items():
-        candidate = next((staging / c for c in candidates if (staging / c).exists() or (staging / c).is_symlink()), None)
-        if candidate is None:
+        candidate = None
+        resolved = None
+        for c in candidates:
+            p = staging / c
+            if not (p.exists() or p.is_symlink()):
+                continue
+            try:
+                rp = resolve_runtime_candidate(p)
+            except SystemExit:
+                continue
+            if rp is None:
+                continue
+            if kind == 'shell' and not (is_elf(rp) or (rp.is_file() and (os.access(rp, os.X_OK) or is_shebang_script(rp)))):
+                continue
+            candidate = p
+            resolved = rp
+            break
+
+        if candidate is None or resolved is None:
             joined = ', '.join(candidates)
             raise SystemExit(f'Missing runtime tool ({kind}) (checked: {joined})')
-        resolved = resolve_runtime_candidate(candidate)
-        if resolved is None:
-            raise SystemExit(f'Runtime tool target missing: {candidate.relative_to(staging)}')
-        if kind == 'shell' and not (is_elf(resolved) or (resolved.is_file() and os.access(resolved, os.X_OK))):
-            raise SystemExit(
-                f'Shell candidate is not executable runtime binary/script: '
-                f'{candidate.relative_to(staging)} -> {resolved.relative_to(staging)}'
-            )
 
     for p in staging.rglob('*'):
         if p.is_file() and is_text(p):
