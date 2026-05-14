@@ -1,0 +1,202 @@
+name: Arme Benchmark
+
+on:
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    name: ARM benchmark (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: armeabi-v7a
+            triple: armv7-linux-gnueabihf
+          - abi: arm64-v8a
+            triple: aarch64-linux-gnu
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validar manifesto Arme
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest_path = Path("Arme/manifest.json")
+          data = json.loads(manifest_path.read_text(encoding="utf-8"))
+          itens = data.get("itens")
+          if not isinstance(itens, list) or not itens:
+              raise SystemExit("manifesto inválido: chave 'itens' ausente ou vazia")
+
+          required = ("arquivo", "tipo", "status", "pode_compilar")
+          sem_classificacao = []
+          for idx, item in enumerate(itens):
+              missing = [k for k in required if k not in item or item[k] in (None, "")]
+              if missing:
+                  sem_classificacao.append({"index": idx, "arquivo": item.get("arquivo"), "missing": missing})
+
+          if sem_classificacao:
+              print("Itens sem classificação obrigatória detectados:")
+              for row in sem_classificacao:
+                  print(row)
+              raise SystemExit(2)
+
+          print(f"Manifesto validado com {len(itens)} itens classificados.")
+          PY
+
+      - name: Build MVP (somente módulos implementáveis)
+        env:
+          ABI: ${{ matrix.abi }}
+          TARGET_TRIPLE: ${{ matrix.triple }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/${ABI}
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          abi = os.environ["ABI"]
+          triple = os.environ["TARGET_TRIPLE"]
+          root = Path('.')
+          manifest = json.loads(Path("Arme/manifest.json").read_text(encoding="utf-8"))
+
+          candidates = []
+          for item in manifest["itens"]:
+              path = item["arquivo"]
+              if item.get("tipo") != "implementavel":
+                  continue
+              if not item.get("pode_compilar", False):
+                  continue
+              if not path.endswith((".c", ".S", ".s")):
+                  continue
+              p = root / path
+              if p.exists():
+                  candidates.append(p)
+
+          if not candidates:
+              raise SystemExit("Nenhum módulo implementável compilável encontrado no manifesto.")
+
+          results = []
+          for src in candidates:
+              out_obj = Path("out") / abi / (src.name + ".o")
+              cmd = ["clang", "-target", triple, "-c", str(src), "-o", str(out_obj)]
+              proc = subprocess.run(cmd, capture_output=True, text=True)
+              results.append({
+                  "source": str(src),
+                  "object": str(out_obj),
+                  "rc": proc.returncode,
+                  "stdout": proc.stdout[-8000:],
+                  "stderr": proc.stderr[-8000:],
+              })
+              if proc.returncode != 0:
+                  print(f"Falha ao compilar {src}")
+                  print(proc.stderr)
+                  raise SystemExit(proc.returncode)
+
+          Path("out") .mkdir(exist_ok=True)
+          Path(f"out/{abi}/compile-results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+          print(f"Compilados: {len(results)} módulos para {abi}")
+          PY
+
+      - name: Gerar benchmark e manifestos
+        env:
+          ABI: ${{ matrix.abi }}
+        run: |
+          set -euo pipefail
+          mkdir -p Arme/reports
+          python3 - <<'PY'
+          import csv
+          import hashlib
+          import json
+          import os
+          import platform
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          abi = os.environ["ABI"]
+          compile_results_path = Path(f"out/{abi}/compile-results.json")
+          compile_results = json.loads(compile_results_path.read_text(encoding="utf-8"))
+
+          compiled = [r for r in compile_results if r["rc"] == 0]
+          c_count = sum(1 for r in compiled if r["source"].endswith('.c'))
+          asm_count = sum(1 for r in compiled if r["source"].endswith(('.S', '.s')))
+          equivalence = "equivalente" if c_count > 0 and asm_count > 0 else "parcial"
+
+          digest = hashlib.sha256(compile_results_path.read_bytes()).hexdigest()
+
+          reports_dir = Path("Arme/reports")
+          report_json = reports_dir / "benchmark.json"
+          report_csv = reports_dir / "benchmark.csv"
+          report_md = reports_dir / "benchmark.md"
+          build_info = reports_dir / "build-info.txt"
+          artifact_manifest = reports_dir / "artifact-manifest.json"
+
+          payload = {
+              "generated_at": datetime.now(timezone.utc).isoformat(),
+              "abi": abi,
+              "compiled_modules": len(compiled),
+              "c_modules": c_count,
+              "asm_modules": asm_count,
+              "c_asm_equivalence": equivalence,
+              "compile_results_sha256": digest,
+          }
+          report_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+          with report_csv.open("w", newline="", encoding="utf-8") as f:
+              writer = csv.DictWriter(f, fieldnames=list(payload.keys()))
+              writer.writeheader()
+              writer.writerow(payload)
+
+          report_md.write_text(
+              "# ARM Benchmark\\n\\n"
+              f"- ABI: `{abi}`\\n"
+              f"- Módulos compilados: `{len(compiled)}`\\n"
+              f"- C/ASM: `{c_count}` / `{asm_count}`\\n"
+              f"- Equivalência C/ASM: `{equivalence}`\\n"
+              f"- SHA256: `{digest}`\\n",
+              encoding="utf-8",
+          )
+
+          build_info.write_text(
+              f"abi={abi}\\n"
+              f"python={platform.python_version()}\\n"
+              f"timestamp_utc={datetime.now(timezone.utc).isoformat()}\\n",
+              encoding="utf-8",
+          )
+
+          artifacts = [
+              str(report_json), str(report_csv), str(report_md),
+              str(build_info), str(artifact_manifest), str(compile_results_path)
+          ]
+          artifact_manifest.write_text(json.dumps({"abi": abi, "files": artifacts}, indent=2), encoding="utf-8")
+
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          summary.write_text(
+              f"## Arme benchmark ({abi})\\n"
+              f"- Hash: `{digest}`\\n"
+              f"- ABI avaliada: `{abi}`\\n"
+              f"- Status equivalência C/ASM: `{equivalence}`\\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload artefatos benchmark
+        uses: actions/upload-artifact@v4
+        with:
+          name: arme-benchmark-${{ matrix.abi }}
+          if-no-files-found: error
+          path: |
+            Arme/reports/benchmark.json
+            Arme/reports/benchmark.csv
+            Arme/reports/benchmark.md
+            Arme/reports/build-info.txt
+            Arme/reports/artifact-manifest.json
+            out/${{ matrix.abi }}/compile-results.json
