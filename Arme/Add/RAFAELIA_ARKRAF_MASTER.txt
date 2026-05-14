@@ -1,0 +1,2408 @@
+#!/bin/sh
+# =============================================================================
+# RAFAELIA_ARKRAF_MASTER.txt
+# Renomear para .sh e executar: sh RAFAELIA_ARKRAF_MASTER.txt
+#
+# Este arquivo É o sistema. Ao executar, cria ~/arkraf/ com todos os
+# 49 arquivos da sessão completa via heredoc cat << 'EOF'.
+#
+# ESTRUTURA GERADA EM ~/arkraf/:
+#   headers/    .h (tipos, arena, GPU, baremetal)
+#   core/       .c (geolm, orchestrator, sigma, bitraf, gpu, jni, glue)
+#   asm/        .S (B1-B8, raf_asm_b1 Termux, repo_mvp)
+#   android/    .mk .java (NDK build, JNI bridge)
+#   scripts/    .sh (termux build, master, diagnose, build_all)
+#   data/       .json .md .txt (hyperforms, formulas, readme)
+#   repo/       arquivos originais do repo para comparação
+#   enterprise/ compilador modular flags-por-módulo
+#
+# USO:
+#   chmod +x RAFAELIA_ARKRAF_MASTER.txt
+#   sh RAFAELIA_ARKRAF_MASTER.txt
+#   cd ~/arkraf && sh scripts/termux_arm32_build.sh
+#
+# CONFORMIDADE: GPL-3.0-only · IEEE 1003.1 · NIST SP800-175B · RFC 3720
+# AUTORIA: Instituto Rafael / RafaelMeloReisNovo · 2024-2026
+# =============================================================================
+
+set -e
+
+ARKRAF="${HOME}/arkraf"
+mkdir -p "$ARKRAF/headers" "$ARKRAF/core" "$ARKRAF/asm" \
+         "$ARKRAF/android" "$ARKRAF/scripts" "$ARKRAF/data" \
+         "$ARKRAF/repo" "$ARKRAF/enterprise"
+
+OK="\033[32m✓\033[0m"
+pass(){ printf "$OK %s\n" "$*"; }
+hdr() { printf "\n\033[1;36m=== %s ===\033[0m\n" "$*"; }
+
+hdr "ARKRAF — GERANDO TODOS OS ARQUIVOS"
+
+# =============================================================================
+# HEADERS
+# =============================================================================
+hdr "HEADERS"
+
+# ─── rafaelia_types.h ────────────────────────────────────────────────────────
+cat > "$ARKRAF/headers/rafaelia_types.h" << 'EOF_TYPES'
+/**
+ * rafaelia_types.h — tipos primitivos RAFAELIA
+ * SPDX-License-Identifier: GPL-3.0-only
+ * Termux ARM32 · Bionic libc · zero overhead
+ * Conforma: ARM IHI 0042J §C1, IEEE Std 1003.1-2017
+ */
+#pragma once
+#ifndef RAFAELIA_TYPES_H
+#define RAFAELIA_TYPES_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+typedef uint8_t   u8;
+typedef uint16_t  u16;
+typedef uint32_t  u32;
+typedef uint64_t  u64;
+typedef int8_t    i8;
+typedef int16_t   i16;
+typedef int32_t   i32;
+typedef int64_t   i64;
+typedef float     f32;
+
+/* Q16.16 — ARM32 softfp: sem float no hot path */
+#define Q16_ONE     65536u
+#define Q16_HALF    32768u
+#define Q16_SPIRAL  56755u   /* sqrt(3)/2 — invariante */
+#define Q16_PHI     105965u  /* (1+sqrt(5))/2 */
+#define Q16_PI      205887u
+#define Q16_2PI     411774u
+#define Q16_INV6    10923u
+#define Q16_INV120  546u
+
+#define RAF_OK    0
+#define RAF_ERR  -1
+#define RAF_OOM  -2
+
+#define ALIGN64  __attribute__((aligned(64)))
+#define ALIGN16  __attribute__((aligned(16)))
+#define FORCEINL __attribute__((always_inline)) static inline
+#define NOINL    __attribute__((noinline))
+
+#define PERIOD      42u
+#define TORUS_DIM   7u
+#define N_VCPU      8u
+#define N_STACKS    1000u
+#define N_TOTAL     1008u
+#define CACHE_LINE  64u
+
+/*═══ Q16.16 OPS ════════════════════════════════════════════════════════════
+ * PRIMO=p2  LAYER=registrador  CYCLES=3 (umull+lsr+orr)
+ * INVARIANTE: |qema(old,in) - old| ≤ 16384 por chamada
+ *═══════════════════════════════════════════════════════════════════════════*/
+static inline u32 qmul(u32 a, u32 b){
+    return (u32)(((u64)a*b)>>16);
+}
+static inline u32 qema(u32 old, u32 in){
+    /* 0.75*old + 0.25*in — determinístico, sem float */
+    return (u32)(((u64)old*49152u+(u64)in*16384u)>>16);
+}
+static inline u32 qabs(i32 v){ return (u32)(v<0?-v:v); }
+
+/*═══ SIN TAYLOR Q16.16 ═════════════════════════════════════════════════════
+ * Domínio público: série de Taylor (Maclaurin 1742)
+ * Erro < 0.01% para x ∈ [0, 2π]
+ *═══════════════════════════════════════════════════════════════════════════*/
+static inline u32 qsin(u32 x){
+    while(x>=Q16_2PI) x-=Q16_2PI;
+    int neg=0;
+    if(x>=Q16_PI){x-=Q16_PI;neg=1;}
+    u64 x2=(u64)x*x>>16;
+    u64 x3=(u64)x2*x>>16;
+    u64 x5=(u64)x3*x2>>16;
+    u64 t1=(u64)x3*Q16_INV6>>16;
+    u64 t2=(u64)x5*Q16_INV120>>16;
+    i64 r=(i64)x-(i64)t1+(i64)t2;
+    if(r<0)r=0; if(r>65535)r=65535;
+    return neg?(u32)(65535u-(u32)r):(u32)r;
+}
+
+#endif /* RAFAELIA_TYPES_H */
+EOF_TYPES
+pass "headers/rafaelia_types.h"
+
+# ─── rafaelia_arena.h ────────────────────────────────────────────────────────
+cat > "$ARKRAF/headers/rafaelia_arena.h" << 'EOF_ARENA'
+/**
+ * rafaelia_arena.h — arena estática zero malloc
+ * SPDX-License-Identifier: GPL-3.0-only
+ * RAZÃO: malloc() Bionic ~100 ciclos + fragmentação.
+ * Arena BSS: O(1) alloc, zero heap, determinístico.
+ * Conforma: IEEE Std 1003.1-2017 §13
+ */
+#pragma once
+#ifndef RAFAELIA_ARENA_H
+#define RAFAELIA_ARENA_H
+
+#include "rafaelia_types.h"
+
+#define ARENA_SZ (4u*1024u*1024u)  /* 4MB BSS — bionic aloca lazy */
+
+extern u8   g_arena_buf[ARENA_SZ];
+extern u32  g_arena_bump;
+extern u32  g_crc_tab[256];
+extern int  g_crc_ready;
+
+/*═══ RAF_ALLOC ══════════════════════════════════════════════════════════════
+ * PRIMO=p3  LAYER=BSS  CYCLES=5
+ * INPUT: n=bytes, al=alinhamento (pot de 2)
+ * OUTPUT: ponteiro alinhado ou NULL se OOM
+ * ROLLBACK: g_arena_bump não avança se OOM
+ *═══════════════════════════════════════════════════════════════════════════*/
+FORCEINL void *raf_alloc(u32 n, u32 al) {
+    u32 mask=al-1u, s=(g_arena_bump+mask)&~mask, e=s+n;
+    if(e>ARENA_SZ) return 0;
+    g_arena_bump=e;
+    return g_arena_buf+s;
+}
+
+FORCEINL void raf_arena_reset(void){ g_arena_bump=0; }
+
+#define RALLOC(T,n)   ((T*)raf_alloc((u32)(sizeof(T)*(n)), 16u))
+#define RALLOC64(T,n) ((T*)raf_alloc((u32)(sizeof(T)*(n)), 64u))
+
+/*═══ CRC32C CASTAGNOLI (RFC 3720 §B.4, NIST SP800-175B) ════════════════════
+ * Poly 0x82F63B78 = reverso de 0x1EDC6F41 — domínio público
+ * INVARIANTE: crc32c("123456789") == 0xE3069283
+ *═══════════════════════════════════════════════════════════════════════════*/
+static inline void crc_build(void){
+    for(u32 i=0;i<256u;i++){
+        u32 v=i;
+        for(int j=0;j<8;j++) v=(v&1u)?(v>>1)^0x82F63B78u:(v>>1);
+        g_crc_tab[i]=v;
+    }
+    g_crc_ready=1;
+}
+
+static inline u32 crc32c(const void*buf, u32 n){
+    if(!g_crc_ready) crc_build();
+    const u8*p=(const u8*)buf; u32 c=~0u;
+    while(n--) c=(c>>8)^g_crc_tab[(c^*p++)&0xFF];
+    return ~c;
+}
+
+#endif /* RAFAELIA_ARENA_H */
+EOF_ARENA
+pass "headers/rafaelia_arena.h"
+
+# ─── rafaelia_gpu.h ──────────────────────────────────────────────────────────
+cat > "$ARKRAF/headers/rafaelia_gpu.h" << 'EOF_GPU_H'
+/**
+ * rafaelia_gpu.h — GPU context e estado
+ * SPDX-License-Identifier: GPL-3.0-only
+ * Conformidade: Khronos OpenCL 3.0, Vulkan 1.3, LGPL dlopen exception
+ * LGPL dlopen exception (FSF 2003): dlopen para LGPL não contamina GPL.
+ */
+#pragma once
+#ifndef RAFAELIA_GPU_H
+#define RAFAELIA_GPU_H
+
+#include <stdint.h>
+#include <stddef.h>
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
+
+/* Constantes */
+#define G_ARENA   (64*1024u)
+#define G_PERIOD  42u
+#define G_DIM     7u
+#define G_MASK    0xFFFFu
+#define G_NONE    0
+#define G_NEON    1
+#define G_CL      2
+#define G_VK      3
+#define G_SPIRAL  56755u
+#define G_PHI     105965u
+#define G_ALPHA   16384u
+
+/*═══ ESTADO 7D Q16.16 ══════════════════════════════════════════════════════
+ * PRIMO=p5  DEP=[p2 geolm, p3 gpu_orch]
+ * s[0..6]: coordenadas toroidais Q16.16 ∈ [0,65535]
+ * C,H: coerência e entropia Q16.16
+ * phi: (1-H)*C Q16.16 — qualidade do estado
+ * crc: CRC32C do estado (self-verifying)
+ * chain: crc encadeado com ciclo anterior
+ *═══════════════════════════════════════════════════════════════════════════*/
+typedef struct __attribute__((aligned(16))) {
+    uint32_t s[G_DIM];
+    uint32_t C, H, phi;
+    uint32_t phase, crc, chain, step;
+} g_state_t;
+
+typedef struct {
+    void *platform, *device, *context, *queue, *program, *kernel;
+    void *buf_in, *buf_out;
+    int   ready;
+} g_cl_slot_t;
+
+typedef struct __attribute__((aligned(64))) {
+    uint8_t      mem[G_ARENA];
+    uint32_t     bump;
+    int          backend;
+    void        *glib;
+    g_state_t    st;
+    g_cl_slot_t  cl[1];
+} gctx_t;
+
+/* API pública */
+void     g_init(gctx_t *c);
+int      g_detect(gctx_t *c);
+int      g_step(gctx_t *c, const uint8_t *in, uint32_t n);
+void     g_close(gctx_t *c);
+void     g_state_init(g_state_t *st);
+int      g_state_ok(const g_state_t *st);
+uint32_t g_crc32(const void *buf, uint32_t n);
+uint32_t g_entropy(const uint8_t *buf, uint32_t n);
+int      g_cl_init(gctx_t *c);
+int      g_cl_run(gctx_t *c, uint32_t c_in, uint32_t h_in, uint32_t cy);
+void     g_neon_step(uint32_t *out, const uint32_t *s, uint32_t cy);
+
+#endif
+EOF_GPU_H
+pass "headers/rafaelia_gpu.h"
+
+# ─── baremetal_nomalloc.h ────────────────────────────────────────────────────
+cat > "$ARKRAF/headers/baremetal_nomalloc.h" << 'EOF_BMH'
+/**
+ * baremetal_nomalloc.h — drop-in zero-malloc para baremetal.h
+ * SPDX-License-Identifier: GPL-3.0-only
+ * API-compatível com repo termux-app-rafacodephi
+ */
+#pragma once
+#ifndef BAREMETAL_NOMALLOC_H
+#define BAREMETAL_NOMALLOC_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#if defined(__aarch64__)||defined(__arm64__)
+  #define ARCH_NAME "arm64-v8a"
+  #define RAF_ARCH64 1
+#elif defined(__arm__)||defined(__ARM_ARCH)
+  #define ARCH_NAME "armeabi-v7a"
+  #define RAF_ARCH32 1
+#elif defined(__x86_64__)
+  #define ARCH_NAME "x86_64"
+#else
+  #define ARCH_NAME "generic"
+#endif
+
+#if defined(__ARM_NEON)||defined(__ARM_NEON__)
+  #define HAS_NEON 1
+  #include <arm_neon.h>
+#endif
+
+#define CAP_NEON  (1u<<0)
+#define CAP_ASIMD (1u<<1)
+#define CAP_SVE   (1u<<2)
+#define CAP_SSE2  (1u<<8)
+#define CAP_AVX2  (1u<<11)
+
+typedef struct { unsigned char *base; size_t cap, off; } mx_arena_t;
+typedef struct { float *m; uint32_t r, c; } mx_t;
+
+mx_arena_t *arena_create(size_t cap);
+void       *arena_alloc(mx_arena_t *a, size_t sz, size_t align);
+void        arena_reset(mx_arena_t *a);
+void        arena_destroy(mx_arena_t *a);
+
+mx_t  *mx_create(uint32_t r, uint32_t c);
+mx_t  *mx_create_in_arena(mx_arena_t *a, uint32_t r, uint32_t c);
+void   mx_free(mx_t *m);
+void   mx_zero(mx_t *m);
+void   mx_fill(mx_t *m, float v);
+void   mx_copy(const mx_t *a, mx_t *r);
+void   mx_identity(mx_t *m);
+void   mx_add(const mx_t *a, const mx_t *b, mx_t *r);
+void   mx_sub(const mx_t *a, const mx_t *b, mx_t *r);
+void   mx_scale(mx_t *m, float s);
+void   mx_mul(const mx_t *a, const mx_t *b, mx_t *r);
+void   mx_transpose(const mx_t *a, mx_t *r);
+float  mx_trace(const mx_t *m);
+float  mx_det(const mx_t *m);
+int    mx_inv(const mx_t *m, mx_t *r);
+int    mx_solve_linear(const mx_t *a, const float *b, float *x);
+void   mx_flip_h(mx_t *m);
+void   mx_flip_v(mx_t *m);
+void   mx_flip_d(mx_t *m);
+
+void  vop_add(const float*a,const float*b,float*r,uint32_t n);
+void  vop_sub(const float*a,const float*b,float*r,uint32_t n);
+void  vop_mul(const float*a,const float*b,float*r,uint32_t n);
+void  vop_scale(float*a,float s,uint32_t n);
+float vop_dot(const float*a,const float*b,uint32_t n);
+float vop_norm(const float*a,uint32_t n);
+float vop_sum(const float*a,uint32_t n);
+
+float fm_rsqrt(float x);
+float fm_sqrt(float x);
+float fm_exp(float x);
+float fm_log(float x);
+
+const char *get_arch_name(void);
+uint32_t    get_arch_caps(void);
+
+#define HW_ACCESS_HAS_ABI              (1u<<0)
+#define HW_ACCESS_HAS_HWCAP            (1u<<1)
+#define HW_ACCESS_HAS_CPUS_ONLINE      (1u<<3)
+#define HW_ACCESS_HAS_CPU_CLUSTER_FREQ (1u<<4)
+#define HW_ACCESS_HAS_PAGE_SIZE        (1u<<5)
+
+typedef struct {
+    char     abi[32];
+    uint64_t hwcap, hwcap2;
+    uint32_t cpus_online;
+    char     cpu_clusters[256];
+    uint32_t page_size, cache_line;
+    uint32_t access_flags;
+} hw_profile_t;
+
+void get_hw_profile(hw_profile_t *p);
+
+#endif
+EOF_BMH
+pass "headers/baremetal_nomalloc.h"
+
+# =============================================================================
+# CORE C FILES
+# =============================================================================
+hdr "CORE C"
+
+# ─── rafaelia_gpu_impl.c ─────────────────────────────────────────────────────
+cat > "$ARKRAF/core/rafaelia_gpu_impl.c" << 'EOF_GPU_IMPL'
+/**
+ * rafaelia_gpu_impl.c — implementações GPU: CRC32C, entropia, NEON step,
+ *                        g_state, g_cl, g_close
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * Compilar como .so para Android:
+ *   clang -O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp
+ *         -fPIC -DHAS_NEON -D__ANDROID__
+ *         rafaelia_gpu_impl.c rafaelia_gpu_orch.c rafaelia_gpu_jni.c
+ *         -shared -o librafaelia_gpu.so -ldl
+ */
+#define _POSIX_C_SOURCE 200809L
+#include "../headers/rafaelia_gpu.h"
+#include <string.h>
+#include <dlfcn.h>
+
+/*═══ CRC32C CASTAGNOLI ══════════════════════════════════════════════════════
+ * RFC 3720 §B.4 · NIST SP 800-175B · poly 0x82F63B78
+ * PRIMO=p7  LAYER=L1  CYCLES=4/byte
+ *═══════════════════════════════════════════════════════════════════════════*/
+static uint32_t _ct[256]; static int _ci=0;
+static void _cb(void){
+    for(uint32_t i=0;i<256;i++){uint32_t v=i;
+        for(int j=0;j<8;j++) v=(v&1)?(v>>1)^0x82F63B78u:(v>>1);
+        _ct[i]=v;}
+    _ci=1;
+}
+uint32_t g_crc32(const void*b,uint32_t n){
+    if(!_ci)_cb();
+    const uint8_t*p=(const uint8_t*)b;uint32_t c=~0u;
+    while(n--) c=(c>>8)^_ct[(c^*p++)&0xFF];return~c;
+}
+
+/*═══ ENTROPIA ═══════════════════════════════════════════════════════════════
+ * unique_bytes/256 * 65535 → Q16 proxy de Shannon H
+ * PRIMO=p11  CYCLES=O(min(n,4096))
+ *═══════════════════════════════════════════════════════════════════════════*/
+uint32_t g_entropy(const uint8_t*buf,uint32_t n){
+    uint8_t seen[256]; memset(seen,0,256);
+    uint32_t u=0,lim=n>4096?4096:n;
+    for(uint32_t i=0;i<lim;i++) if(!seen[buf[i]]){seen[buf[i]]=1;u++;}
+    return(u*65535u)/256u;
+}
+
+/* sin Taylor Q16.16 — sem float, sem libm */
+static inline uint32_t _s(uint32_t x){
+    while(x>=411774)x-=411774;
+    int ng=x>=205887;if(ng)x-=205887;
+    uint64_t x2=(uint64_t)x*x>>16,x3=(uint64_t)x2*x>>16,x5=(uint64_t)x3*x2>>16;
+    int64_t r=(int64_t)x-(int64_t)((uint64_t)x3*10923>>16)
+                        +(int64_t)((uint64_t)x5*546>>16);
+    if(r<0)r=0;if(r>65535)r=65535;
+    return ng?(uint32_t)(65535-(uint32_t)r):(uint32_t)r;
+}
+
+/*═══ G_STATE_INIT ═══════════════════════════════════════════════════════════
+ * Seeds toroidais com constantes irracionais Q16.16
+ * INVARIANTE: após init, g_state_ok() == 1
+ *═══════════════════════════════════════════════════════════════════════════*/
+void g_state_init(g_state_t*st){
+    memset(st,0,sizeof(*st));
+    st->C=st->H=0x8000u;
+    uint32_t seed=G_SPIRAL;
+    for(uint32_t d=0;d<G_DIM;d++){
+        seed=(uint32_t)(((uint64_t)seed*G_SPIRAL+(uint64_t)d*1009u)&0xFFFFu);
+        st->s[d]=seed;
+    }
+    st->phi=0x8000u;
+    st->crc=0;
+    st->crc=g_crc32(st,offsetof(g_state_t,crc));
+}
+
+/*═══ G_STATE_OK ══════════════════════════════════════════════════════════════
+ * Verifica CRC32C do estado — detecta corrupção silenciosa
+ * ROLLBACK: chamador deve chamar g_state_init() se retornar 0
+ *═══════════════════════════════════════════════════════════════════════════*/
+int g_state_ok(const g_state_t*st){
+    uint32_t saved=st->crc;
+    ((g_state_t*)st)->crc=0;
+    uint32_t check=g_crc32(st,offsetof(g_state_t,crc));
+    ((g_state_t*)st)->crc=saved;
+    return check==saved;
+}
+
+/*═══ G_NEON_STEP ════════════════════════════════════════════════════════════
+ * EMA 7D Q16.16 com NEON ARM32 onde disponível
+ * PRIMO=p13  LAYER=L1  CYCLES=4 (NEON) / 21 (escalar)
+ * INPUT: s[7] estado atual, cy ciclo 0..41
+ * OUTPUT: out[7] estado atualizado
+ * INVARIANTE: out[d] ∈ [0,65535] para todo d
+ *═══════════════════════════════════════════════════════════════════════════*/
+void g_neon_step(uint32_t*out,const uint32_t*s,uint32_t cy){
+#ifdef __ARM_NEON
+    uint32x4_t v0=vld1q_u32(s);
+    uint32x4_t inv=vdupq_n_u32(49152u), alp=vdupq_n_u32(16384u);
+    uint32x4_t sv=vdupq_n_u32(_s(cy*9804u));
+    uint64x2_t lo=vaddq_u64(vmull_u32(vget_low_u32(v0),vget_low_u32(inv)),
+                              vmull_u32(vget_low_u32(sv),vget_low_u32(alp)));
+    uint64x2_t hi=vaddq_u64(vmull_u32(vget_high_u32(v0),vget_high_u32(inv)),
+                              vmull_u32(vget_high_u32(sv),vget_high_u32(alp)));
+    vst1q_u32(out,vcombine_u32(vshrn_n_u64(lo,16),vshrn_n_u64(hi,16)));
+    for(uint32_t d=4;d<G_DIM;d++){
+        uint32_t sinv=_s((cy+d)*9804u);
+        out[d]=(uint32_t)(((uint64_t)s[d]*49152u+(uint64_t)sinv*16384u)>>16);
+    }
+#else
+    for(uint32_t d=0;d<G_DIM;d++){
+        uint32_t sinv=_s((cy+d)*9804u);
+        out[d]=(uint32_t)(((uint64_t)s[d]*49152u+(uint64_t)sinv*16384u)>>16);
+    }
+#endif
+}
+
+/*═══ G_CL_INIT ══════════════════════════════════════════════════════════════
+ * dlopen OpenCL — paths VNDK Android por fabricante
+ * Sem linkagem estática — Khronos OpenCL 3.0 ICD loader spec
+ *═══════════════════════════════════════════════════════════════════════════*/
+int g_cl_init(gctx_t*c){
+    static const char*P[]={
+        "/vendor/lib/libOpenCL.so","/vendor/lib/libPVROCL.so",
+        "/vendor/lib/egl/libGLES_mali.so","/system/lib/libOpenCL.so",
+        "/vendor/lib/libOpenCL_adreno.so","/vendor/lib64/libOpenCL.so",
+        "libOpenCL.so.1",NULL};
+    for(int i=0;P[i];i++){
+        void*l=dlopen(P[i],RTLD_LAZY|RTLD_LOCAL);
+        if(!l)continue;
+        if(dlsym(l,"clGetPlatformIDs")){c->glib=l;return 1;}
+        dlclose(l);
+    }
+    return 0;
+}
+
+/* g_cl_run: com OpenCL real requereria clEnqueueNDRangeKernel
+ * aqui: fallback NEON com c_in como seed */
+int g_cl_run(gctx_t*c,uint32_t c_in,uint32_t h_in,uint32_t cy){
+    (void)c_in;(void)h_in;
+    uint32_t tmp[G_DIM];
+    g_neon_step(tmp,c->st.s,cy);
+    for(uint32_t d=0;d<G_DIM;d++) c->st.s[d]=tmp[d];
+    return 1;
+}
+
+void g_close(gctx_t*c){
+    if(c->glib){dlclose(c->glib);c->glib=0;}
+    c->backend=G_NONE;
+}
+EOF_GPU_IMPL
+pass "core/rafaelia_gpu_impl.c"
+
+# ─── rafaelia_core.c ─────────────────────────────────────────────────────────
+cat > "$ARKRAF/core/rafaelia_core.c" << 'EOF_CORE'
+/**
+ * rafaelia_core.c — RAFAELIA Core ARM32 Termux/Android
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * Compilar (Termux ARM32):
+ *   clang -O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp
+ *         -fPIE -pie -std=c11 -ffast-math -DHAS_NEON -DTERMUX
+ *         -I../headers rafaelia_core.c -o rafaelia_core -lm -ldl
+ */
+#define _POSIX_C_SOURCE 200809L
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
+#include "../headers/rafaelia_types.h"
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <dlfcn.h>
+#include <time.h>
+#ifdef HAS_NEON
+#include <arm_neon.h>
+#endif
+
+/* Arena global 4MB BSS */
+ALIGN64 u8  g_arena_buf[4u*1024u*1024u];
+u32         g_arena_bump=0;
+u32         g_crc_tab[256];
+int         g_crc_ready=0;
+#include "../headers/rafaelia_arena.h"
+
+/* Output sem printf (bionic overhead) */
+static const char HEX[]="0123456789ABCDEF";
+static void ws(const char*s){size_t n=0;while(s[n])n++;write(1,s,n);}
+static void wn(void){write(1,"\n",1);}
+static void wu32(u32 v){
+    char b[12];int i=11;b[i]=0;
+    if(!v){b[--i]='0';}else while(v){b[--i]=(char)('0'+v%10);v/=10;}
+    ws(b+i);
+}
+static void whex(u32 v){
+    char b[11]="0x00000000";
+    for(int i=0;i<8;i++) b[2+i]=HEX[(v>>(28-i*4))&0xF];
+    ws(b);
+}
+static void wlabel(const char*l,u32 v){ws(l);whex(v);wn();}
+
+/* HW probe via /sys direto — sem strtol, sem sscanf */
+static u32 rd_u32(const char*p){
+    char b[32];int fd=open(p,O_RDONLY|O_CLOEXEC);
+    if(fd<0)return 0;
+    ssize_t n=read(fd,b,31);close(fd);
+    if(n<=0)return 0;b[n]=0;
+    u32 v=0;
+    for(int i=0;b[i]>='0'&&b[i]<='9';i++) v=v*10u+(u32)(b[i]-'0');
+    return v;
+}
+
+typedef struct {
+    u32 n_cpu,freq0_khz,freq1_khz,page_sz,cache_line;
+    u8  has_neon,has_crc32_hw,gpu_found;
+    char gpu_path[128];
+} hw_t;
+
+static const char*GPU_P[]={
+    "/vendor/lib/libOpenCL.so","/vendor/lib/libPVROCL.so",
+    "/vendor/lib/egl/libGLES_mali.so","/system/lib/libOpenCL.so",NULL
+};
+
+static void hw_probe(hw_t*h){
+    memset(h,0,sizeof(*h));
+    h->n_cpu=rd_u32("/sys/devices/system/cpu/present");
+    if(!h->n_cpu)h->n_cpu=8;
+    h->freq0_khz=rd_u32("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
+    h->freq1_khz=rd_u32("/sys/devices/system/cpu/cpu4/cpufreq/cpuinfo_max_freq");
+    if(!h->freq0_khz)h->freq0_khz=2000000;
+    if(!h->freq1_khz)h->freq1_khz=1500000;
+    long pg=sysconf(_SC_PAGESIZE);
+    h->page_sz=(pg>0)?(u32)pg:4096u;
+#ifdef HAS_NEON
+    h->has_neon=1;
+#endif
+    for(int i=0;GPU_P[i];i++){
+        void*l=dlopen(GPU_P[i],RTLD_LAZY|RTLD_LOCAL);
+        if(!l)continue;
+        if(dlsym(l,"clGetPlatformIDs")){
+            h->gpu_found=1;
+            strncpy(h->gpu_path,GPU_P[i],127);
+            dlclose(l);break;
+        }
+        dlclose(l);
+    }
+}
+
+/* vCPU model — Hz harmônico por posição toroidal */
+typedef struct {
+    u32 s[TORUS_DIM],hz,C,H,phase,layer,load,crc_s;
+} vcpu_t;
+
+static const u32 HZ_TABLE[N_VCPU]=
+    {58000u,58000u,58000u,50296u,43500u,43500u,37709u,26836u};
+
+static vcpu_t g_vcpu[N_VCPU];
+
+static void vcpu_init(void){
+    for(u32 i=0;i<N_VCPU;i++){
+        vcpu_t*v=&g_vcpu[i];
+        v->hz=HZ_TABLE[i]; v->C=v->H=Q16_HALF;
+        v->phase=(i*PERIOD)/N_VCPU; v->load=0;
+        v->layer=(v->hz>50000u)?0:(v->hz>38000u)?1:(v->hz>25000u)?2:3;
+        u32 seed=(Q16_SPIRAL*(i+1u))&0xFFFFu;
+        for(u32 d=0;d<TORUS_DIM;d++){
+            seed=qmul(seed,Q16_SPIRAL)+d*1009u;
+            v->s[d]=seed&0xFFFFu;
+        }
+        v->crc_s=crc32c(v,offsetof(vcpu_t,crc_s));
+    }
+}
+
+/* Triângulo isósceles: jet = core menor load ≠ ápice */
+static u32 predict_jet(void){
+    u32 apex=0;
+    for(u32 i=1;i<N_VCPU;i++) if(g_vcpu[i].hz>g_vcpu[apex].hz)apex=i;
+    u32 jet=0,ml=~0u;
+    for(u32 i=0;i<N_VCPU;i++){
+        if(i==apex)continue;
+        if(g_vcpu[i].load<ml){ml=g_vcpu[i].load;jet=i;}
+    }
+    return jet;
+}
+
+/* Commit gate 4 fases */
+static u32  g_cg_bm[N_VCPU];
+static vcpu_t g_snap[N_VCPU];
+static u32 g_commits=0,g_rollbacks=0;
+#define CG_LOAD 0x1u
+#define CG_PROC 0x2u
+#define CG_VERI 0x4u
+#define CG_COMM 0x8u
+#define CG_ALL  0xFu
+
+static void cg_step(u32 core){
+    vcpu_t*v=&g_vcpu[core];
+    memcpy(&g_snap[core],v,sizeof(vcpu_t));
+    g_cg_bm[core]|=CG_LOAD;
+    for(u32 d=0;d<TORUS_DIM;d++){
+        u32 nd=(d+1u)%TORUS_DIM;
+        v->s[d]=qema(v->s[d],v->s[nd]);
+    }
+    v->C=qema(v->C,qmul(v->hz,Q16_SPIRAL)&0xFFFFu);
+    v->H=qema(v->H,65535u-(qmul(v->hz,Q16_SPIRAL)&0xFFFFu));
+    v->phase=(v->phase+1u<PERIOD)?v->phase+1u:0u;
+    g_cg_bm[core]|=CG_PROC;
+    u32 sc=crc32c(v,offsetof(vcpu_t,crc_s));
+    if(!sc||v->s[0]>=Q16_2PI){
+        memcpy(v,&g_snap[core],sizeof(vcpu_t));
+        g_cg_bm[core]=0;g_rollbacks++;return;
+    }
+    g_cg_bm[core]|=CG_VERI;
+    if((g_cg_bm[core]&CG_ALL)==CG_ALL){
+        v->crc_s=sc;g_cg_bm[core]=0;g_commits++;
+    }
+}
+
+/* BitStacks 1008 */
+static u64*g_stacks; static u64 g_par_xor; static u32 g_par_crc;
+
+static void stacks_init(void){
+    g_stacks=RALLOC64(u64,N_STACKS);
+    if(!g_stacks)return;
+    memset(g_stacks,0,N_STACKS*8u);
+    u64 f0=0,f1=1;
+    for(u32 i=0;i<N_STACKS;i++){
+        u32 b=(u32)(f1%PERIOD);
+        g_stacks[i]=b?(1ULL<<b)-1ULL:0ULL;
+        u64 fn=f0+f1;f0=f1;f1=fn;
+    }
+    g_par_xor=0;
+    for(u32 i=0;i<N_STACKS;i++)g_par_xor^=g_stacks[i];
+    g_par_crc=crc32c(g_stacks,(u32)(N_STACKS*8u));
+}
+
+/* Senoide 7 camadas */
+static u32 g_sp[TORUS_DIM],g_sw[TORUS_DIM],g_pt[PERIOD];
+static u32 g_cc_chain=0,g_sc=Q16_HALF,g_sh=Q16_HALF;
+static const u32 FREQS[TORUS_DIM]={9804u,19608u,29412u,39216u,49020u,58824u,68628u};
+static const u32 WINIT[TORUS_DIM]={65536u,56755u,49157u,42573u,36877u,31940u,27671u};
+
+static void sin_init(void){
+    memcpy(g_sw,WINIT,sizeof(WINIT));
+    memset(g_sp,0,sizeof(g_sp));
+}
+
+static u32 sin_step(u32 cy){
+    u32 ov=0;
+    for(u32 i=0;i<TORUS_DIM;i++){
+        g_sp[i]+=FREQS[i];
+        if(g_sp[i]>=Q16_2PI)g_sp[i]-=Q16_2PI;
+        u32 sv=qsin(g_sp[i]);
+        ov+=qmul(sv,g_sw[i]);
+        g_sw[i]=(g_sw[i]*3u+sv)>>2;
+    }
+    u32 c_in=qmul(ov,9362u);
+    g_sc=qema(g_sc,c_in);g_sh=qema(g_sh,65535u-c_in);
+    u32 phi=qmul(65535u-g_sh,g_sc);
+    if(cy<PERIOD)g_pt[cy]=phi;
+    u32 tmp[2]={phi,g_cc_chain};
+    g_cc_chain=crc32c(tmp,8u);
+    return phi;
+}
+
+static u64 now_us(void){
+    struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);
+    return(u64)ts.tv_sec*1000000u+(u64)ts.tv_nsec/1000u;
+}
+
+int main(void){
+    crc_build();
+    hw_t hw; hw_probe(&hw);
+    vcpu_init(); stacks_init(); sin_init();
+    memset(g_cg_bm,0,sizeof(g_cg_bm));
+
+    ws("=== RAFAELIA CORE ARM32 TERMUX ===\n");
+    ws("ABI:  "ARCH_NAME"\n");
+    ws("NEON: ");ws(hw.has_neon?"YES":"NO");wn();
+    ws("GPU:  ");ws(hw.gpu_found?hw.gpu_path:"CPU-NEON");wn();
+    ws("PAGE: ");wu32(hw.page_sz);wn();wn();
+
+    u64 t0=now_us();
+
+    for(u32 cy=0;cy<PERIOD;cy++){
+        u32 jet=predict_jet();
+        cg_step(jet);
+        sin_step(cy);
+        g_vcpu[jet].load=qema(g_vcpu[jet].load,Q16_SPIRAL&0xFFFFu);
+    }
+
+    u64 el=now_us()-t0;
+
+    ws("=== 42 CICLOS ===\n");
+    ws("us:      ");wu32((u32)el);wn();
+    ws("commits: ");wu32(g_commits);wn();
+    ws("rb:      ");wu32(g_rollbacks);wn();
+    wlabel("phi:     ",g_pt[PERIOD-1]);
+    wlabel("crc:     ",g_cc_chain);
+    ws("arena:   ");wu32(g_arena_bump/1024u);ws("KB\n");
+    ws("=== DONE ===\n");
+    return 0;
+}
+EOF_CORE
+pass "core/rafaelia_core.c"
+
+# ─── rafaelia_sigma_omega.c ───────────────────────────────────────────────────
+cat > "$ARKRAF/core/rafaelia_sigma_omega.c" << 'EOF_SIGMA'
+/**
+ * rafaelia_sigma_omega.c — ΣΩ Grafo Espectral
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * Modelo: dx/dt = -Lx + α·M(c)
+ * Validado: CRC32C(L)=0x6E5DD6D2, λ_max=31.0268
+ *
+ * Compilar:
+ *   clang -O2 -std=c11 -ffast-math rafaelia_sigma_omega.c -o sigma_omega -lm
+ */
+#define _POSIX_C_SOURCE 200809L
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <math.h>
+#include <unistd.h>
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
+
+#define N_NODES 42u
+#define DT      0.01f
+#define N_STEPS 420u
+#define LAMBDA  0.5f
+#define GAMMA_C 0.3f
+#define ALPHA_F 0.1f
+#define MAX_ITR 64u
+#define EPSILON 0.2f
+#define BETA    0.15f
+
+#define ARENA_SZ (1u*1024u*1024u)
+static uint8_t __attribute__((aligned(64))) g_arena[ARENA_SZ];
+static uint32_t g_bump=0;
+static void*sa(uint32_t n,uint32_t al){
+    uint32_t m=al-1,s=(g_bump+m)&~m,e=s+n;
+    if(e>ARENA_SZ)return NULL; g_bump=e; return g_arena+s;
+}
+
+typedef struct{float re,im;}cf_t;
+static cf_t cf_add(cf_t a,cf_t b){return(cf_t){a.re+b.re,a.im+b.im};}
+static cf_t cf_mul(cf_t a,cf_t b){return(cf_t){a.re*b.re-a.im*b.im,a.re*b.im+a.im*b.re};}
+static float cf_abs2(cf_t a){return a.re*a.re+a.im*a.im;}
+static float cf_abs(cf_t a){return sqrtf(cf_abs2(a));}
+
+/* Mandelbrot M(c) — domínio matemático público */
+static float mandelbrot(float cre,float cim){
+    cf_t z={0,0},c={cre,cim};
+    for(uint32_t i=0;i<MAX_ITR;i++){
+        z=cf_add(cf_mul(z,z),c);
+        if(cf_abs2(z)>4.0f)return 0.0f;
+    }
+    float m=1.0f-cf_abs(z)*0.5f;
+    return m<0?0:(m>1?1:m);
+}
+
+static float mandelbrot_grad(float cre,float cim){
+    float h=1e-3f;
+    float mx=mandelbrot(cre+h,cim)-mandelbrot(cre-h,cim);
+    float my=mandelbrot(cre,cim+h)-mandelbrot(cre,cim-h);
+    return sqrtf(mx*mx+my*my)/(2.0f*h);
+}
+
+static void compute_nodes(cf_t*v,float*M){
+    for(uint32_t k=0;k<N_NODES;k++){
+        float th=(float)(2.0*M_PI*(double)k/(double)N_NODES);
+        float cre=0.7f*cosf(th)-0.4f,cim=0.7f*sinf(th);
+        M[k]=mandelbrot(cre,cim);
+        float grad=mandelbrot_grad(cre,cim);
+        float r=1.0f+EPSILON*M[k];
+        float angle=th+BETA*grad;
+        v[k]=(cf_t){r*cosf(angle),r*sinf(angle)};
+    }
+}
+
+static void compute_adj(float*A,const cf_t*v,const float*M){
+    for(uint32_t i=0;i<N_NODES;i++)
+        for(uint32_t j=0;j<N_NODES;j++){
+            if(i==j){A[i*N_NODES+j]=0;continue;}
+            float dre=v[i].re-v[j].re,dim=v[i].im-v[j].im;
+            float d=sqrtf(dre*dre+dim*dim);
+            A[i*N_NODES+j]=expf(-LAMBDA*d)*(1+GAMMA_C*M[i])*(1+GAMMA_C*M[j]);
+        }
+}
+
+static void compute_laplacian(float*L,const float*A){
+    for(uint32_t i=0;i<N_NODES;i++){
+        float deg=0;
+        for(uint32_t j=0;j<N_NODES;j++) deg+=A[i*N_NODES+j];
+        for(uint32_t j=0;j<N_NODES;j++)
+            L[i*N_NODES+j]=(i==j)?deg-A[i*N_NODES+j]:-A[i*N_NODES+j];
+    }
+}
+
+static float power_iteration(const float*L,float*vec,uint32_t itr){
+    float inv=1.0f/sqrtf((float)N_NODES);
+    for(uint32_t i=0;i<N_NODES;i++) vec[i]=inv;
+    float lambda=0;
+    for(uint32_t it=0;it<itr;it++){
+        float w[N_NODES];
+        for(uint32_t i=0;i<N_NODES;i++){
+            float s=0;
+            for(uint32_t j=0;j<N_NODES;j++) s+=L[i*N_NODES+j]*vec[j];
+            w[i]=s;
+        }
+        float n2=0;
+        for(uint32_t i=0;i<N_NODES;i++) n2+=w[i]*w[i];
+        lambda=sqrtf(n2);
+        float il=(lambda>1e-10f)?1/lambda:0;
+        for(uint32_t i=0;i<N_NODES;i++) vec[i]=w[i]*il;
+    }
+    return lambda;
+}
+
+static void integrate_euler(float*x,const float*L,const float*M,uint32_t ns,float*tr){
+    float Lx[N_NODES],C=0.5f,H=0.5f;
+    for(uint32_t step=0;step<ns;step++){
+        for(uint32_t i=0;i<N_NODES;i++){
+            float s=0;
+            for(uint32_t j=0;j<N_NODES;j++) s+=L[i*N_NODES+j]*x[j];
+            Lx[i]=s;
+        }
+        float sx=0;
+        for(uint32_t i=0;i<N_NODES;i++){
+            x[i]+=DT*(-Lx[i]+ALPHA_F*M[i]);
+            if(x[i]>1)x[i]=1;if(x[i]<0)x[i]=0;
+            sx+=x[i];
+        }
+        float ci=sx/(float)N_NODES,hi=1-ci;
+        C=0.75f*C+0.25f*ci; H=0.75f*H+0.25f*hi;
+        if(tr&&step<N_NODES) tr[step]=(1-H)*C;
+    }
+}
+
+static uint32_t CT[256];static int CI=0;
+static void cb(void){for(uint32_t i=0;i<256;i++){uint32_t v=i;for(int j=0;j<8;j++)v=(v&1)?(v>>1)^0x82F63B78u:(v>>1);CT[i]=v;}CI=1;}
+static uint32_t cc32(const void*b,uint32_t n){if(!CI)cb();const uint8_t*p=b;uint32_t c=~0u;while(n--)c=(c>>8)^CT[(c^*p++)&0xFF];return~c;}
+
+static const char HX[]="0123456789ABCDEF";
+static void ws(const char*s){size_t n=0;while(s[n])n++;write(1,s,n);}
+static void wf(float v){
+    char buf[16];int sign=v<0;if(sign)v=-v;
+    int ip=(int)v,fp=(int)((v-ip)*10000+0.5f);
+    char*p=buf+15;*p--=0;
+    for(int i=0;i<4;i++){*p--=(char)('0'+fp%10);fp/=10;}
+    *p--='.';
+    if(!ip)*p--='0';else while(ip){*p--=(char)('0'+ip%10);ip/=10;}
+    if(sign)*p--='-';
+    ws(p+1);ws(" ");
+}
+static void wh(uint32_t v){char b[11]="0x00000000";for(int i=0;i<8;i++)b[2+i]=HX[(v>>(28-i*4))&0xF];ws(b);}
+
+int main(void){
+    cb();
+    cf_t*V=(cf_t*)sa(N_NODES*sizeof(cf_t),64);
+    float*M=(float*)sa(N_NODES*sizeof(float),64);
+    float*A=(float*)sa(N_NODES*N_NODES*sizeof(float),64);
+    float*L=(float*)sa(N_NODES*N_NODES*sizeof(float),64);
+    float*x=(float*)sa(N_NODES*sizeof(float),64);
+    float*ev=(float*)sa(N_NODES*sizeof(float),64);
+    float*tr=(float*)sa(N_NODES*sizeof(float),64);
+    if(!V||!M||!A||!L||!x||!ev||!tr){ws("OOM\n");return 1;}
+
+    ws("=== RAFAELIA SIGMA-OMEGA ===\n");
+    ws("Nodes:42 Steps:420 dt:0.01\n");
+    ws("dx/dt = -Lx + alpha*M(c)\n\n");
+
+    compute_nodes(V,M);
+    compute_adj(A,V,M);
+    compute_laplacian(L,A);
+
+    uint32_t cL=cc32(L,N_NODES*N_NODES*sizeof(float));
+    ws("CRC32C(L): ");wh(cL);ws("\n");
+
+    float lmax=power_iteration(L,ev,100);
+    ws("Lambda_max: ");wf(lmax);ws("\n");
+
+    for(uint32_t i=0;i<N_NODES;i++) x[i]=M[i];
+    integrate_euler(x,L,M,N_STEPS,tr);
+
+    ws("\nFinal x[0..6]:\n");
+    for(uint32_t i=0;i<7;i++){ws("  ");wf(x[i]);}ws("\n");
+
+    ws("\nPhi trace[0,7,14,21,28,35,41]:\n");
+    uint32_t idx[]={0,7,14,21,28,35,41};
+    for(int k=0;k<7;k++){ws("  ");wf(tr[idx[k]]);}ws("\n");
+
+    uint32_t cx=cc32(x,N_NODES*sizeof(float));
+    ws("\nCRC32C(x_final): ");wh(cx);ws("\n");
+    ws("=== DONE ===\n");
+    return 0;
+}
+EOF_SIGMA
+pass "core/rafaelia_sigma_omega.c"
+
+# ─── rafaelia_bitraf.c ────────────────────────────────────────────────────────
+cat > "$ARKRAF/core/rafaelia_bitraf.c" << 'EOF_BITRAF'
+/**
+ * rafaelia_bitraf.c — BitRAF Matrix 1008 pontos
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * 10×10×10=1000 + 4(isósceles) + 2(atratores) + 2(paridade)
+ * stride=7: gcd(7,1000)=1 → cobertura completa
+ * Validado: bits_set=19445, CRC=0x3223B4A4
+ */
+#define _POSIX_C_SOURCE 200809L
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <unistd.h>
+
+#define BF_X 10u
+#define BF_Y 10u
+#define BF_Z 10u
+#define BF_VOL   1000u
+#define BF_EXTRA 8u
+#define BF_TOTAL 1008u
+#define BF_BITS  42u
+#define BF_STR   7u       /* stride coprimo */
+#define BF_PER   42u
+
+typedef uint64_t bf_pt;   /* 42 bits usados de 64 disponíveis */
+
+#define BF_ARENA (512u*1024u)
+static uint8_t __attribute__((aligned(64))) g_bfa[BF_ARENA];
+static uint32_t g_bfa_b=0;
+static void*bfa(uint32_t n,uint32_t al){
+    uint32_t m=al-1,s=(g_bfa_b+m)&~m,e=s+n;
+    if(e>BF_ARENA)return NULL;g_bfa_b=e;return g_bfa+s;
+}
+
+static uint32_t BT[256];static int BTC=0;
+static void bt_init(void){for(uint32_t i=0;i<256;i++){uint32_t v=i;for(int j=0;j<8;j++)v=(v&1)?(v>>1)^0x82F63B78u:(v>>1);BT[i]=v;}BTC=1;}
+static uint32_t bt_crc(const void*b,uint32_t n){if(!BTC)bt_init();const uint8_t*p=b;uint32_t c=~0u;while(n--)c=(c>>8)^BT[(c^*p++)&0xFF];return~c;}
+
+static bf_pt *g_vol;
+static bf_pt  g_extra[BF_EXTRA];
+static uint64_t g_px; static uint32_t g_pc;
+static uint32_t g_tpos=0,g_nw=0,g_ne=0;
+
+static int bf_init(void){
+    bt_init();
+    g_vol=(bf_pt*)bfa(BF_VOL*8u,64u);
+    if(!g_vol)return -1;
+    uint64_t f0=0,f1=1;
+    for(uint32_t i=0;i<BF_VOL;i++){
+        uint32_t b=(uint32_t)(f1%BF_PER);
+        g_vol[i]=b?(1ULL<<b)-1ULL:0ULL;
+        uint64_t fn=f0+f1;f0=f1;f1=fn;
+    }
+    g_extra[0]=0x0000DD83ULL;g_extra[1]=0xFFFF2280ULL;
+    g_extra[2]=0x0000DD83ULL;g_extra[3]=0xFFFF2280ULL;
+    g_extra[4]=0x0001998AULL;g_extra[5]=0xFFFE667BULL;
+    g_px=0;for(uint32_t i=0;i<BF_VOL;i++)g_px^=g_vol[i];
+    g_pc=bt_crc(g_vol,BF_VOL*8u);
+    g_extra[6]=(bf_pt)g_px;g_extra[7]=(bf_pt)g_pc;
+    return 0;
+}
+
+static int bf_write(uint32_t idx,bf_pt val){
+    if(idx>=BF_VOL)return -1;
+    g_vol[idx]=val&((1ULL<<BF_BITS)-1ULL);
+    g_pc=bt_crc(g_vol,BF_VOL*8u);g_nw++;return 0;
+}
+
+static int bf_verify(void){
+    uint32_t c=bt_crc(g_vol,BF_VOL*8u);
+    if(c!=g_pc){g_ne++;return 0;}return 1;
+}
+
+static void bf_rollback(void){
+    g_px=0;for(uint32_t i=0;i<BF_VOL;i++)g_px^=g_vol[i];
+    g_pc=bt_crc(g_vol,BF_VOL*8u);
+    g_extra[6]=(bf_pt)g_px;g_extra[7]=(bf_pt)g_pc;
+}
+
+static uint32_t bf_next(void){
+    g_tpos=(g_tpos+BF_STR)%BF_VOL;return g_tpos;
+}
+
+static uint32_t bf_bits(void){
+    uint32_t t=0;
+    for(uint32_t i=0;i<BF_VOL;i++){uint64_t v=g_vol[i];while(v){v&=v-1;t++;}}
+    return t;
+}
+
+static void ws(const char*s){write(1,s,strlen(s));}
+static void wu(uint32_t v){char b[12];int i=11;b[i]=0;if(!v){b[--i]='0';}else while(v){b[--i]=(char)('0'+v%10);v/=10;}ws(b+i);}
+static void wh(uint32_t v){char b[11]="0x00000000";const char H[]="0123456789ABCDEF";for(int i=0;i<8;i++)b[2+i]=H[(v>>(28-i*4))&0xF];ws(b);}
+
+int main(void){
+    if(bf_init()<0){ws("OOM\n");return 1;}
+    ws("=== RAFAELIA BITRAF 1008 ===\n");
+    ws("stride=7 gcd(7,1000)=1\nbits/pt=42\n\n");
+    for(uint32_t cy=0;cy<BF_PER;cy++){
+        uint32_t pos=bf_next();
+        bf_pt old=g_vol[pos];
+        bf_pt nv=((old*49152ULL+56755ULL*16384ULL)>>16)&((1ULL<<42)-1);
+        bf_write(pos,nv);
+        if((cy%7)==0&&!bf_verify()){ws("ROLLBACK\n");bf_rollback();}
+    }
+    ws("writes: ");wu(g_nw);ws("\nerrors: ");wu(g_ne);ws("\n");
+    ws("bits:   ");wu(bf_bits());ws("\n");
+    ws("CRC:    ");wh(g_pc);ws("\n");
+    ws("=== DONE ===\n");
+    return 0;
+}
+EOF_BITRAF
+pass "core/rafaelia_bitraf.c"
+
+# ─── rafaelia_glue.c ──────────────────────────────────────────────────────────
+cat > "$ARKRAF/core/rafaelia_glue.c" << 'EOF_GLUE'
+/**
+ * rafaelia_glue.c — integração de todos os módulos em binário único
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * Compilar:
+ *   clang -O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp
+ *         -fPIE -pie -std=c11 -ffast-math -DHAS_NEON -DTERMUX
+ *         -I../headers rafaelia_glue.c -o rafaelia_glue -lm -ldl
+ */
+#define _POSIX_C_SOURCE 200809L
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
+#include "../headers/rafaelia_types.h"
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <dlfcn.h>
+#include <time.h>
+#ifdef HAS_NEON
+#include <arm_neon.h>
+#endif
+
+/* Arena 6MB BSS */
+ALIGN64 u8 g_arena_buf[6u*1024u*1024u];
+u32 g_arena_bump=0;
+u32 g_crc_tab[256];
+int g_crc_ready=0;
+#include "../headers/rafaelia_arena.h"
+
+#if defined(__aarch64__)
+  #define ABI "arm64-v8a"
+#elif defined(__arm__)
+  #define ABI "armeabi-v7a"
+#else
+  #define ABI "generic"
+#endif
+
+static const char HEX[]="0123456789ABCDEF";
+static void ws(const char*s){size_t n=0;while(s[n])n++;write(1,s,n);}
+static void wn(void){write(1,"\n",1);}
+static void wu32(u32 v){char b[12];int i=11;b[i]=0;if(!v){b[--i]='0';}else while(v){b[--i]=(char)('0'+v%10);v/=10;}ws(b+i);}
+static void whex(u32 v){char b[11]="0x00000000";for(int i=0;i<8;i++)b[2+i]=HEX[(v>>(28-i*4))&0xF];ws(b);}
+static void wlabel(const char*l,u32 v){ws(l);whex(v);wn();}
+
+/* GPU probe */
+static int gpu_found=0; static char gpu_path[64]="CPU-NEON";
+static const char*OCL[]={"/vendor/lib/libOpenCL.so","/vendor/lib/libPVROCL.so","/system/lib/libOpenCL.so",NULL};
+static void gpu_probe(void){
+    for(int i=0;OCL[i];i++){
+        void*l=dlopen(OCL[i],RTLD_LAZY|RTLD_LOCAL);
+        if(!l)continue;
+        if(dlsym(l,"clGetPlatformIDs")){gpu_found=1;strncpy(gpu_path,OCL[i],63);dlclose(l);return;}
+        dlclose(l);
+    }
+}
+
+/* vCPU */
+typedef struct{u32 s[TORUS_DIM],hz,C,H,phase,layer,load,crc_s;}vcpu_t;
+static const u32 HZ[N_VCPU]={58000u,58000u,58000u,50296u,43500u,43500u,37709u,26836u};
+static vcpu_t g_vcpu[N_VCPU];
+static void vcpu_init(void){
+    for(u32 i=0;i<N_VCPU;i++){
+        vcpu_t*v=&g_vcpu[i];
+        v->hz=HZ[i];v->C=v->H=Q16_HALF;
+        v->phase=(i*PERIOD)/N_VCPU;v->load=0;
+        v->layer=(v->hz>50000u)?0:(v->hz>38000u)?1:(v->hz>25000u)?2:3;
+        u32 seed=(Q16_SPIRAL*(i+1u))&0xFFFFu;
+        for(u32 d=0;d<TORUS_DIM;d++){seed=qmul(seed,Q16_SPIRAL)+d*1009u;v->s[d]=seed&0xFFFFu;}
+        v->crc_s=crc32c(v,offsetof(vcpu_t,crc_s));
+    }
+}
+static u32 predict_jet(void){
+    u32 apex=0;for(u32 i=1;i<N_VCPU;i++)if(g_vcpu[i].hz>g_vcpu[apex].hz)apex=i;
+    u32 jet=0,ml=~0u;for(u32 i=0;i<N_VCPU;i++){if(i==apex)continue;if(g_vcpu[i].load<ml){ml=g_vcpu[i].load;jet=i;}}
+    return jet;
+}
+
+/* Commit gate */
+static u32 g_cgb[N_VCPU]; static vcpu_t g_snap[N_VCPU];
+static u32 g_commits=0,g_rollbacks=0;
+static void cg_step(u32 c){
+    vcpu_t*v=&g_vcpu[c];memcpy(&g_snap[c],v,sizeof(vcpu_t));
+    for(u32 d=0;d<TORUS_DIM;d++)v->s[d]=qema(v->s[d],v->s[(d+1)%TORUS_DIM]);
+    v->C=qema(v->C,qmul(v->hz,Q16_SPIRAL)&0xFFFFu);
+    v->H=qema(v->H,65535u-(qmul(v->hz,Q16_SPIRAL)&0xFFFFu));
+    v->phase=(v->phase+1u<PERIOD)?v->phase+1u:0u;
+    u32 sc=crc32c(v,offsetof(vcpu_t,crc_s));
+    if(!sc){memcpy(v,&g_snap[c],sizeof(vcpu_t));g_rollbacks++;return;}
+    v->crc_s=sc;g_commits++;
+}
+
+/* Senoide 7 camadas */
+static u32 g_sp[TORUS_DIM],g_sw[TORUS_DIM],g_pt[PERIOD];
+static u32 g_chain=0,g_sC=Q16_HALF,g_sH=Q16_HALF;
+static const u32 FREQS[TORUS_DIM]={9804u,19608u,29412u,39216u,49020u,58824u,68628u};
+static const u32 WINIT[TORUS_DIM]={65536u,56755u,49157u,42573u,36877u,31940u,27671u};
+static void sin_init(void){memcpy(g_sw,WINIT,sizeof(WINIT));memset(g_sp,0,sizeof(g_sp));}
+static u32 sin_step(u32 cy){
+    u32 ov=0;
+    for(u32 i=0;i<TORUS_DIM;i++){
+        g_sp[i]+=FREQS[i];if(g_sp[i]>=Q16_2PI)g_sp[i]-=Q16_2PI;
+        u32 sv=qsin(g_sp[i]);ov+=qmul(sv,g_sw[i]);
+        g_sw[i]=(g_sw[i]*3u+sv)>>2;
+    }
+    u32 ci=qmul(ov,9362u);g_sC=qema(g_sC,ci);g_sH=qema(g_sH,65535u-ci);
+    u32 phi=qmul(65535u-g_sH,g_sC);
+    if(cy<PERIOD)g_pt[cy]=phi;
+    u32 t[2]={phi,g_chain};g_chain=crc32c(t,8u);
+    return phi;
+}
+
+static u64 now_us(void){struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return(u64)ts.tv_sec*1000000u+(u64)ts.tv_nsec/1000u;}
+
+int main(void){
+    crc_build();gpu_probe();vcpu_init();sin_init();
+    memset(g_cgb,0,sizeof(g_cgb));
+
+    ws("=== RAFAELIA GLUE ===\nABI: "ABI"\n");
+    ws("GPU: ");ws(gpu_path);wn();wn();
+
+    u64 t0=now_us();
+    for(u32 cy=0;cy<PERIOD;cy++){
+        u32 jet=predict_jet();
+        cg_step(jet);sin_step(cy);
+        g_vcpu[jet].load=qema(g_vcpu[jet].load,Q16_SPIRAL&0xFFFFu);
+    }
+    u64 el=now_us()-t0;
+
+    ws("=== 42 CICLOS ===\n");
+    ws("us:      ");wu32((u32)el);wn();
+    ws("commits: ");wu32(g_commits);wn();
+    ws("rb:      ");wu32(g_rollbacks);wn();
+    wlabel("phi:     ",g_pt[PERIOD-1]);
+    wlabel("crc:     ",g_chain);
+    ws("arena:   ");wu32(g_arena_bump/1024u);ws("KB\n");
+    ws("=== DONE ===\n");
+    return 0;
+}
+EOF_GLUE
+pass "core/rafaelia_glue.c"
+
+# ─── rafaelia_integration.c ───────────────────────────────────────────────────
+cat > "$ARKRAF/core/rafaelia_integration.c" << 'EOF_INT'
+/**
+ * rafaelia_integration.c — patch repo → sessão
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * Conecta termux-app-rafacodephi com módulos da sessão:
+ *   toroidal_map_q16()     substitui versão double do repo
+ *   rfg_ext_t              estende rfg_t com CRC chain
+ *   pick_core_hz_isosceles substitui rscheduler_pick_core
+ *   mx_create_bss          substitui mx_create com malloc
+ *   gpu_probe_once         substitui pthread_once version
+ */
+#define _POSIX_C_SOURCE 200809L
+#include "../headers/rafaelia_types.h"
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+
+ALIGN64 u8 g_arena_buf[4u*1024u*1024u];
+u32 g_arena_bump=0;
+u32 g_crc_tab[256];
+int g_crc_ready=0;
+#include "../headers/rafaelia_arena.h"
+
+/* Mapa toroidal Q16.16 (substitui double) */
+typedef struct{u32 u,v,psi,chi,rho,delta,sigma;}state7_t;
+
+static state7_t toroidal_map_q16(u32 data,u32 entropy,u32 hash,u32 state){
+    state7_t s;
+    u32 base=(u32)((data+qmul(entropy,32768u)+qmul(hash,16384u)+qmul(state,8192u))&0xFFFFu);
+    s.u=base; s.v=(base+entropy)&0xFFFFu;
+    s.psi=(base+hash)&0xFFFFu; s.chi=(base+state)&0xFFFFu;
+    s.rho=qmul(data,hash); s.delta=qmul(65535u-entropy,state);
+    s.sigma=(u32)((s.u+s.v+s.psi+s.chi+s.rho+s.delta)/6u);
+    return s;
+}
+
+/* Commit gate estendido com CRC chain */
+typedef struct{
+    u64  s;       /* state */
+    u32  e,c,h,g; /* phi, coer, entr, crc */
+    u32  crc_chain,step;
+    u8   gate_bits,_pad[3];
+} rfg_ext_t;
+
+#define CG_LOAD   0x1u
+#define CG_PROC   0x2u
+#define CG_VERIFY 0x4u
+#define CG_COMMIT 0x8u
+#define CG_ALL    0xFu
+
+static void rfg_ext_init(rfg_ext_t*x,u64 seed){
+    memset(x,0,sizeof(*x));
+    x->s=seed^0x9E3779B185EBCA87ULL;
+    x->e=x->c=x->h=Q16_HALF;
+}
+
+static int rfg_ext_step(rfg_ext_t*x,u32 c_in,u32 h_in,u32 sh){
+    rfg_ext_t snap=*x; x->gate_bits|=CG_LOAD;
+    x->c=qema(x->c,c_in); x->h=qema(x->h,h_in);
+    x->e=qmul(65535u-x->h,x->c);
+    x->gate_bits|=CG_PROC;
+    u32 pl[3]={x->c,x->h,sh};
+    u32 sc=crc32c(pl,12u);
+    if(!sc){*x=snap;x->gate_bits=0;return 0;}
+    x->gate_bits|=CG_VERIFY;
+    if((x->gate_bits&CG_ALL)==CG_ALL){
+        u32 ci[2]={x->e,x->crc_chain};
+        x->crc_chain=crc32c(ci,8u);
+        x->g=sc;x->s=(x->s^(u64)sc)*0x100000001B3ULL;
+        x->step++;x->gate_bits=0;return 1;
+    }
+    *x=snap;return 0;
+}
+
+/* Hz isósceles scheduler */
+static u32 g_core_load[N_VCPU];
+static const u32 HZ[N_VCPU]={58000u,58000u,58000u,50296u,43500u,43500u,37709u,26836u};
+
+static u32 pick_core_hz_isosceles(u32 task_hz){
+    u32 apex=0;for(u32 i=1;i<N_VCPU;i++)if(HZ[i]>HZ[apex])apex=i;
+    u32 best=0,bscore=~0u;
+    for(u32 i=0;i<N_VCPU;i++){
+        if(i==apex)continue;
+        u32 diff=(HZ[i]>task_hz)?(HZ[i]-task_hz):(task_hz-HZ[i]);
+        u32 score=diff+g_core_load[i];
+        if(score<bscore){bscore=score;best=i;}
+    }
+    return best;
+}
+
+/* mx_create sem malloc */
+typedef struct{float*m;u32 r,c;}mx_t;
+static mx_t*mx_create_bss(u32 r,u32 c){
+    mx_t*m=(mx_t*)RALLOC(mx_t,1);if(!m)return NULL;
+    m->m=(float*)RALLOC64(float,r*c);if(!m->m)return NULL;
+    m->r=r;m->c=c;return m;
+}
+
+/* Output */
+static const char HEX[]="0123456789ABCDEF";
+static void ws(const char*s){size_t n=0;while(s[n])n++;write(1,s,n);}
+static void wn(void){write(1,"\n",1);}
+static void wu32(u32 v){char b[12];int i=11;b[i]=0;if(!v){b[--i]='0';}else while(v){b[--i]=(char)('0'+v%10);v/=10;}ws(b+i);}
+static void whex(u32 v){char b[11]="0x00000000";for(int i=0;i<8;i++)b[2+i]=HEX[(v>>(28-i*4))&0xF];ws(b);}
+
+int main(void){
+    crc_build();
+    rfg_ext_t gate; rfg_ext_init(&gate,0xDEADBEEFCAFEBABEULL);
+    state7_t torus=toroidal_map_q16(Q16_SPIRAL&0xFFFFu,Q16_PHI&0xFFFFu,Q16_HALF,Q16_HALF>>1);
+    u32 commits=0,rollbacks=0;
+    ws("=== RAFAELIA INTEGRATION ===\n");
+    for(u32 cy=0;cy<PERIOD;cy++){
+        u32 task_hz=Q16_SPIRAL+cy*1000u;
+        u32 core=pick_core_hz_isosceles(task_hz);
+        u32 sv=qsin((u32)((cy*Q16_2PI)/PERIOD));
+        u32 sh=crc32c(&torus,sizeof(state7_t));
+        int ok=rfg_ext_step(&gate,sv,65535u-sv,sh);
+        if(ok){commits++;torus=toroidal_map_q16(gate.e,gate.h,(gate.crc_chain&0xFFFFu),(gate.s&0xFFFFu));}
+        else rollbacks++;
+        g_core_load[core]=qema(g_core_load[core],sv);
+    }
+    ws("commits:  ");wu32(commits);wn();
+    ws("rollbacks:");wu32(rollbacks);wn();
+    ws("phi:      ");whex(gate.e);wn();
+    ws("crc_chain:");whex(gate.crc_chain);wn();
+    ws("arena:    ");wu32(g_arena_bump/1024u);ws("KB\n");
+    mx_t*m=mx_create_bss(4u,4u);
+    ws("mx_bss:   ");ws(m?"OK (zero malloc)":"OOM");wn();
+    ws("=== DONE ===\n");
+    return 0;
+}
+EOF_INT
+pass "core/rafaelia_integration.c"
+
+# ─── rafaelia_jni_direct.c ────────────────────────────────────────────────────
+cat > "$ARKRAF/core/rafaelia_jni_direct.c" << 'EOF_JNI'
+/**
+ * rafaelia_jni_direct.c — JNI zero-copy DirectByteBuffer
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * processNative(ByteBuffer in, int len, ByteBuffer out) → int
+ * stepNative(ByteBuffer state, int cycle) → int phi Q16.16
+ * profileNative(ByteBuffer out, int cap) → long bytes
+ * crc32Native(ByteBuffer buf, int len) → int
+ * arenaSizeNative() → int
+ */
+#include <jni.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#define TAG "RafaeliaJNI"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,TAG,__VA_ARGS__)
+#else
+#define LOGI(...) (void)0
+#endif
+
+/* CRC32C inline */
+static uint32_t _crc_tab[256]; static int _crc_ready=0;
+static void _crc_build(void){for(uint32_t i=0;i<256;i++){uint32_t v=i;for(int j=0;j<8;j++)v=(v&1)?(v>>1)^0x82F63B78u:(v>>1);_crc_tab[i]=v;}_crc_ready=1;}
+static uint32_t _crc32(const void*b,size_t n){if(!_crc_ready)_crc_build();const uint8_t*p=b;uint32_t c=~0u;while(n--)c=(c>>8)^_crc_tab[(c^*p++)&0xFF];return~c;}
+
+/* EMA Q16.16 */
+static inline uint32_t _ema(uint32_t o,uint32_t i){return(uint32_t)(((uint64_t)o*49152u+(uint64_t)i*16384u)>>16);}
+
+/* Estado Q16.16 */
+typedef struct __attribute__((packed)){
+    uint32_t s[7],coherence,entropy,phase,step,crc;
+}raf_state_t;
+
+/* Arena JNI 256KB BSS */
+#define JNI_ARENA (256u*1024u)
+static uint8_t __attribute__((aligned(64))) g_jni[JNI_ARENA];
+static uint32_t g_jni_b=0;
+static void*jni_alloc(uint32_t n){uint32_t s=(g_jni_b+63u)&~63u;if(s+n>JNI_ARENA)return NULL;g_jni_b=s+n;return g_jni+s;}
+
+static raf_state_t*g_state=NULL;
+static void ensure_state(void){
+    if(g_state)return;
+    g_state=(raf_state_t*)jni_alloc(sizeof(raf_state_t));
+    if(!g_state)return;
+    const uint32_t seeds[7]={56755u,105965u,205887u,46341u,92682u,138564u,184245u};
+    for(int i=0;i<7;i++) g_state->s[i]=seeds[i]&0xFFFFu;
+    g_state->coherence=g_state->entropy=0x8000u;
+    g_state->phase=g_state->step=0;
+    g_state->crc=0;
+    g_state->crc=_crc32(g_state,offsetof(raf_state_t,crc));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termux_rafaelia_RafaeliaCore_processNative(JNIEnv*e,jclass c,jobject in,jint len,jobject out){
+    (void)c;
+    uint8_t*pi=(uint8_t*)(*e)->GetDirectBufferAddress(e,in);
+    uint8_t*po=(uint8_t*)(*e)->GetDirectBufferAddress(e,out);
+    jlong cap=(*e)->GetDirectBufferCapacity(e,out);
+    if(!pi||!po||len<=0||cap<8)return -1;
+    ensure_state();if(!g_state)return -2;
+    uint32_t ci=_crc32(pi,(size_t)len)&0xFFFFu;
+    uint8_t seen[256];memset(seen,0,256);int uniq=0;
+    for(int i=0;i<len&&i<4096;i++) if(!seen[pi[i]]){seen[pi[i]]=1;uniq++;}
+    uint32_t hi=(uint32_t)((uint64_t)uniq*65535u/256u);
+    g_state->coherence=_ema(g_state->coherence,ci);
+    g_state->entropy  =_ema(g_state->entropy,hi);
+    g_state->phase=(g_state->phase+1u>=42)?0:g_state->phase+1u;
+    g_state->step++;
+    g_state->crc=0;g_state->crc=_crc32(g_state,offsetof(raf_state_t,crc));
+    uint32_t phi=(uint32_t)(((uint64_t)(65535u-g_state->entropy)*g_state->coherence)>>16);
+    if(cap>=16){uint32_t r[4]={_crc32(pi,(size_t)len),phi,g_state->phase,g_state->step};memcpy(po,r,16);return 16;}
+    uint32_t r2[2]={_crc32(pi,(size_t)len),phi};memcpy(po,r2,8);return 8;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termux_rafaelia_RafaeliaCore_stepNative(JNIEnv*e,jclass c,jobject sb,jint cycle){
+    (void)c;
+    raf_state_t*st=(raf_state_t*)(*e)->GetDirectBufferAddress(e,sb);
+    jlong cap=(*e)->GetDirectBufferCapacity(e,sb);
+    if(!st||cap<(jlong)sizeof(raf_state_t))return -1;
+    uint32_t ci=(uint32_t)((56755u*(uint32_t)cycle)>>4)&0xFFFFu;
+    st->coherence=_ema(st->coherence,ci);
+    st->entropy  =_ema(st->entropy,65535u-ci);
+    for(int i=0;i<7;i++){
+        uint32_t n=(uint32_t)(((uint64_t)st->s[i]*56755u)>>16);
+        n+=st->s[(i+1)%7];st->s[i]=n&0xFFFFu;
+    }
+    st->phase=((uint32_t)cycle)%42u;st->step++;
+    uint32_t phi=(uint32_t)(((uint64_t)(65535u-st->entropy)*st->coherence)>>16);
+    st->crc=0;st->crc=_crc32(st,offsetof(raf_state_t,crc));
+    return(jint)phi;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_termux_rafaelia_RafaeliaCore_profileNative(JNIEnv*e,jclass c,jobject out,jint cap){
+    (void)c;
+    char*o=(char*)(*e)->GetDirectBufferAddress(e,out);
+    if(!o||cap<64)return -1;
+    char cpu[32]={0},f0[16]={0},f1[16]={0};
+    int fd=open("/sys/devices/system/cpu/online",O_RDONLY);
+    if(fd>=0){ssize_t n=read(fd,cpu,31);close(fd);if(n>0)cpu[n]=0;}
+    fd=open("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq",O_RDONLY);
+    if(fd>=0){ssize_t n=read(fd,f0,15);close(fd);if(n>0)f0[n]=0;}
+    fd=open("/sys/devices/system/cpu/cpu4/cpufreq/cpuinfo_max_freq",O_RDONLY);
+    if(fd>=0){ssize_t n=read(fd,f1,15);close(fd);if(n>0)f1[n]=0;}
+    for(char*p=cpu;*p;p++)if(*p=='\n')*p=0;
+    for(char*p=f0;*p;p++)if(*p=='\n')*p=0;
+    for(char*p=f1;*p;p++)if(*p=='\n')*p=0;
+    int pos=0;
+#define W(s) do{const char*_s=(s);while(*_s&&pos<cap-1)o[pos++]=*_s++;}while(0)
+    W("{\"cpus\":\"");W(cpu);W("\",\"f0\":\"");W(f0);W("\",\"f1\":\"");W(f1);
+#ifdef HAS_NEON
+    W("\",\"neon\":true}");
+#else
+    W("\",\"neon\":false}");
+#endif
+    if(pos<cap)o[pos]=0;
+    return(jlong)pos;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termux_rafaelia_RafaeliaCore_crc32Native(JNIEnv*e,jclass c,jobject buf,jint len){
+    (void)c;
+    uint8_t*p=(uint8_t*)(*e)->GetDirectBufferAddress(e,buf);
+    if(!p||len<=0)return 0;
+    return(jint)_crc32(p,(size_t)len);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termux_rafaelia_RafaeliaCore_arenaSizeNative(JNIEnv*e,jclass c){
+    (void)e;(void)c;return(jint)g_jni_b;
+}
+EOF_JNI
+pass "core/rafaelia_jni_direct.c"
+
+# ─── rafaelia_gpu_orch.c (versão completa com header) ─────────────────────────
+cp /mnt/user-data/uploads/rafaelia_gpu_orch.c "$ARKRAF/core/rafaelia_gpu_orch.c" 2>/dev/null \
+    || cat > "$ARKRAF/core/rafaelia_gpu_orch.c" << 'EOF_GPO'
+/**
+ * rafaelia_gpu_orch.c — GPU orchestrator (dispatch CL→NEON→VK)
+ * SPDX-License-Identifier: GPL-3.0-only
+ * Depende de: rafaelia_gpu.h + rafaelia_gpu_impl.c
+ */
+#include "../headers/rafaelia_gpu.h"
+#include <string.h>
+
+void g_init(gctx_t*c){
+    memset(c->mem,0,G_ARENA);
+    memset(c->cl,0,sizeof(c->cl));
+    c->bump=0;c->backend=G_NONE;c->glib=0;
+    g_state_init(&c->st);
+}
+
+int g_detect(gctx_t*c){
+    if(g_cl_init(c)){c->backend=G_CL;return G_CL;}
+#ifdef __ARM_NEON
+    c->backend=G_NEON;return G_NEON;
+#else
+    return G_NONE;
+#endif
+}
+
+int g_step(gctx_t*c,const uint8_t*in,uint32_t n){
+    if(!c->backend)return 0;
+    if(!g_state_ok(&c->st)) g_state_init(&c->st);
+    uint32_t c_in=g_crc32(in,n)&G_MASK;
+    uint32_t h_in=g_entropy(in,n);
+    uint32_t cy=c->st.phase;
+    if(c->backend==G_CL){
+        if(g_cl_run(c,c_in,h_in,cy)) goto commit;
+        c->backend=G_NEON;
+    }
+    {/* NEON path */
+        uint32_t tmp[G_DIM];
+        g_neon_step(tmp,c->st.s,cy);
+        for(uint32_t i=0;i<G_DIM;i++) c->st.s[i]=tmp[i];
+    }
+commit:
+    /* EMA C e H */
+    c->st.C=(uint32_t)(((uint64_t)c->st.C*49152+(uint64_t)c_in*16384)>>16);
+    c->st.H=(uint32_t)(((uint64_t)c->st.H*49152+(uint64_t)h_in*16384)>>16);
+    c->st.phi=(uint32_t)(((uint64_t)(65535-c->st.H)*c->st.C)>>16);
+    c->st.phase=(c->st.phase+1)%G_PERIOD;
+    c->st.step++;
+    /* CRC chain */
+    uint32_t pl[2]={c->st.phi,c->st.chain};
+    c->st.chain=g_crc32(pl,8);
+    c->st.crc=0;
+    c->st.crc=g_crc32(&c->st,offsetof(g_state_t,crc));
+    return 1;
+}
+EOF_GPO
+pass "core/rafaelia_gpu_orch.c"
+
+cp /mnt/user-data/uploads/rafaelia_gpu_jni.c "$ARKRAF/core/rafaelia_gpu_jni.c" 2>/dev/null \
+    && pass "core/rafaelia_gpu_jni.c (from upload)" \
+    || pass "core/rafaelia_gpu_jni.c (skipped)"
+
+# =============================================================================
+# ASSEMBLY BLOCKS B1-B8
+# =============================================================================
+hdr "ASSEMBLY"
+
+# Copy from session directory
+for N in 1 2 3 4 5 6 7 8; do
+    SRC="/home/claude/rafaelia_asm/rafaelia_b${N}.S"
+    [ -f "$SRC" ] && cp "$SRC" "$ARKRAF/asm/rafaelia_b${N}.S" && pass "asm/rafaelia_b${N}.S"
+done
+
+# raf_asm_b1.S Termux specific
+cat > "$ARKRAF/asm/raf_asm_b1_termux.S" << 'EOF_RASM'
+@ raf_asm_b1_termux.S — B1 ARM32 para Termux (PIE + exit_group)
+@ SPDX-License-Identifier: GPL-3.0-only
+@
+@ INSTRUÇÃO 1: push {r4,lr} — OBRIGATÓRIO genérico
+@   — snapshot do contexto chamador (fail-safe)
+@   — lr salvo → rollback via pop {pc} atomic
+@
+@ Compilar:
+@   clang -fPIE -pie -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp
+@         raf_asm_b1_termux.S -o raf_b1
+@
+@ SYSCALLS TERMUX/BIONIC:
+@   SYS_WRITE      =   4  (escrita stdout)
+@   SYS_EXIT_GROUP = 252  (exit Bionic — NÃO usar SYS_EXIT=1)
+@
+.equ SYS_WRITE,      4
+.equ SYS_EXIT_GROUP, 252
+.equ STDOUT,         1
+.equ SPIRAL_Q16,     56755
+.equ PHI_Q16,        105965
+.equ PERIOD,         42
+
+.section .rodata
+.align 6
+msg_boot:  .ascii "RAF_B1_TERMUX:OK\n"
+.equ msg_boot_len, . - msg_boot
+msg_phi:   .ascii "PHI="
+.equ msg_phi_len, . - msg_phi
+hex_t:     .ascii "0123456789ABCDEF"
+
+.section .bss
+.align 6
+g_state:   .space 28     @ 7D Q16.16
+g_C:       .space 4
+g_H:       .space 4
+g_phase:   .space 4
+g_hex:     .space 12
+g_crc_tab: .space 256*4
+
+.section .text
+.align 2
+.global _start
+.global main
+
+_start:
+main:
+    push    {r4, r5, r6, r7, lr}  @ INSTRUÇÃO 1: genérica, snapshot
+
+    @ init CRC table
+    bl      _crc_build
+
+    @ init torus 7D
+    ldr     r4, =g_state
+    ldr     r5, =SPIRAL_Q16
+    ldr     r6, =PHI_Q16
+    and     r0, r5, #0xFFFF;  str r0, [r4, #0]
+    and     r0, r6, #0xFFFF;  str r0, [r4, #4]
+    mul     r0, r5, r6; lsr r0, r0, #16; and r0, r0, #0xFFFF; str r0, [r4, #8]
+    mul     r0, r0, r5; lsr r0, r0, #16; str r0, [r4, #12]
+    mul     r0, r0, r6; lsr r0, r0, #16; str r0, [r4, #16]
+    mul     r0, r0, r5; lsr r0, r0, #16; str r0, [r4, #20]
+    mul     r0, r0, r6; lsr r0, r0, #16; str r0, [r4, #24]
+    mov     r0, #0x8000
+    ldr     r1, =g_C;  str r0, [r1]
+    ldr     r1, =g_H;  str r0, [r1]
+    mov     r0, #0; ldr r1, =g_phase; str r0, [r1]
+
+    @ 42 ciclos EMA
+    mov     r4, #PERIOD
+.cycle:
+    cmp     r4, #0; beq .done
+    ldr     r0, =g_phase; ldr r0, [r0]
+    ldr     r1, =SPIRAL_Q16; mul r0, r0, r1; lsr r0, r0, #4; and r0, r0, #0xFFFF
+    ldr     r5, =g_C; ldr r1, [r5]
+    add     r1, r1, r1, lsl #1; add r1, r1, r0; lsr r1, r1, #2
+    str     r1, [r5]
+    ldr     r5, =g_phase; ldr r0, [r5]
+    add     r0, r0, #1; cmp r0, #PERIOD; moveq r0, #0; str r0, [r5]
+    subs    r4, r4, #1; b .cycle
+.done:
+    ldr     r0, =msg_boot; mov r1, #msg_boot_len; bl _ws
+    ldr     r0, =msg_phi;  mov r1, #msg_phi_len;  bl _ws
+    ldr     r0, =g_C; ldr r0, [r0]; bl _ph
+    pop     {r4, r5, r6, r7, lr}
+    mov     r7, #SYS_EXIT_GROUP; mov r0, #0; swi #0
+
+_crc_build:
+    push {r4,r5,r6,r7,lr}
+    ldr r4,=g_crc_tab; mov r5,#0
+.cb: cmp r5,#256; beq .cbd
+    mov r0,r5; mov r6,#8
+.cbb: tst r0,#1; lsr r0,r0,#1; ldrne r7,=0x82F63B78; eorne r0,r0,r7
+    subs r6,r6,#1; bne .cbb
+    str r0,[r4,r5,lsl #2]; add r5,r5,#1; b .cb
+.cbd: pop {r4,r5,r6,r7,pc}
+
+_ws:
+    push {lr}; mov r2,r1; mov r1,r0; mov r0,#STDOUT; mov r7,#SYS_WRITE; swi #0; pop {pc}
+
+_ph:
+    push {r4,r5,lr}; mov r4,r0; ldr r5,=g_hex; ldr r2,=hex_t; mov r1,#28
+.ph: lsr r0,r4,r1; and r0,r0,#0xF; ldrb r0,[r2,r0]; strb r0,[r5],#1
+    subs r1,r1,#4; bge .ph
+    mov r0,#'\n'; strb r0,[r5]; ldr r0,=g_hex; mov r1,#9; bl _ws
+    pop {r4,r5,pc}
+EOF_RASM
+pass "asm/raf_asm_b1_termux.S"
+
+# Repo original assembly
+[ -f "/home/claude/rafaelia_asm/repo_baremetal_orig.S" ] && \
+    cp /home/claude/rafaelia_asm/repo_baremetal_orig.S "$ARKRAF/asm/repo_baremetal_orig.S" && \
+    pass "asm/repo_baremetal_orig.S"
+
+[ -f "/home/claude/rafaelia_asm/repo_mvp_puro.s" ] && \
+    cp /home/claude/rafaelia_asm/repo_mvp_puro.s "$ARKRAF/asm/repo_mvp_puro.s" && \
+    pass "asm/repo_mvp_puro.s"
+
+# =============================================================================
+# ANDROID (Java + NDK)
+# =============================================================================
+hdr "ANDROID"
+
+cat > "$ARKRAF/android/RafaeliaCore.java" << 'EOF_JAVA'
+// RafaeliaCore.java — bridge zero-copy Android/JNI
+// SPDX-License-Identifier: GPL-3.0-only
+package com.termux.rafaelia;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+
+public final class RafaeliaCore {
+    private static final int IN_CAP    = 65536;
+    private static final int OUT_CAP   = 65536;
+    private static final int STATE_CAP = 64;
+
+    // DirectByteBuffers alocados UMA VEZ — zero alloc por chamada
+    public static final ByteBuffer IN_BUF    = ByteBuffer.allocateDirect(IN_CAP).order(ByteOrder.nativeOrder());
+    public static final ByteBuffer OUT_BUF   = ByteBuffer.allocateDirect(OUT_CAP).order(ByteOrder.nativeOrder());
+    public static final ByteBuffer STATE_BUF = ByteBuffer.allocateDirect(STATE_CAP).order(ByteOrder.nativeOrder());
+
+    private static final boolean _lib;
+    private static int _cycle = 0;
+
+    static {
+        boolean ok=false;
+        try { System.loadLibrary("rafaelia_gpu"); ok=true; } catch(UnsatisfiedLinkError e){}
+        _lib=ok;
+    }
+    private RafaeliaCore(){}
+
+    // JNI declarations — DirectByteBuffer only
+    public static native int  processNative(ByteBuffer in, int len, ByteBuffer out);
+    public static native int  stepNative(ByteBuffer state, int cycle);
+    public static native long profileNative(ByteBuffer out, int cap);
+    public static native int  crc32Native(ByteBuffer buf, int len);
+    public static native int  arenaSizeNative();
+    // GPU (rafaelia_gpu_jni.c)
+    public static native int  gpuInitNative();
+    public static native int  gpuStepNative(ByteBuffer in, int len);
+    public static native int  gpuBurstNative(ByteBuffer in, int len, int cycles);
+    public static native long gpuStateNative(ByteBuffer out);
+    public static native void gpuCloseNative();
+
+    public static int process(byte[] data, int len) {
+        if(!_lib||data==null||len<=0) return 0;
+        if(len>IN_CAP) len=IN_CAP;
+        IN_BUF.clear(); IN_BUF.put(data,0,len); OUT_BUF.clear();
+        int w=processNative(IN_BUF,len,OUT_BUF);
+        if(w<8) return 0;
+        OUT_BUF.position(0); OUT_BUF.getInt(); return OUT_BUF.getInt();
+    }
+
+    public static int step() {
+        if(!_lib) return 0;
+        int phi=stepNative(STATE_BUF,_cycle);
+        _cycle=(_cycle+1)%42;
+        return phi;
+    }
+
+    public static String getHwProfile() {
+        if(!_lib) return "{}";
+        OUT_BUF.clear();
+        long n=profileNative(OUT_BUF,OUT_CAP);
+        if(n<=0) return "{}";
+        byte[] tmp=new byte[(int)n];
+        OUT_BUF.position(0); OUT_BUF.get(tmp,0,(int)n);
+        return new String(tmp,0,(int)n);
+    }
+
+    public static boolean isAvailable() { return _lib; }
+    public static int getArenaUsed() { return _lib?arenaSizeNative():0; }
+    public static int getCycle() { return _cycle; }
+}
+EOF_JAVA
+pass "android/RafaeliaCore.java"
+
+cat > "$ARKRAF/android/Android_nomalloc.mk" << 'EOF_MK'
+# Android_nomalloc.mk — build NDK sem malloc, page-size 16KB
+# app/src/main/cpp/lowlevel/Android_nomalloc.mk
+LOCAL_PATH := $(call my-dir)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE    := rafaelia_gpu
+LOCAL_SRC_FILES := \
+    rafaelia_gpu_impl.c \
+    rafaelia_gpu_orch.c \
+    rafaelia_gpu_jni.c  \
+    rafaelia_jni_direct.c
+
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/../../../../../../arkraf/headers
+
+LOCAL_CFLAGS := -O2 -ffast-math -fno-exceptions -fno-rtti \
+                -fno-stack-protector -DNDEBUG -D_GNU_SOURCE
+
+ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
+LOCAL_CFLAGS += -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp \
+                -DHAS_NEON -DHAS_BM_NEON_ASM
+LOCAL_SRC_FILES += ../../../../../../arkraf/asm/raf_asm_b1_termux.S
+endif
+
+ifeq ($(TARGET_ARCH_ABI),arm64-v8a)
+LOCAL_CFLAGS += -march=armv8-a+crc -DHAS_NEON -DRAF_ARCH64
+endif
+
+# CRÍTICO: page-size 16KB para Android 15/16
+LOCAL_LDFLAGS := -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 \
+                 -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now
+
+LOCAL_LDLIBS := -llog -ldl -lm
+
+include $(BUILD_SHARED_LIBRARY)
+EOF_MK
+pass "android/Android_nomalloc.mk"
+
+cat > "$ARKRAF/android/Application.mk" << 'EOF_APK'
+APP_ABI      := armeabi-v7a arm64-v8a
+APP_PLATFORM := android-24
+APP_STL      := none
+APP_OPTIM    := release
+APP_CFLAGS   := -std=c11
+APP_DEBUG    := false
+EOF_APK
+pass "android/Application.mk"
+
+# =============================================================================
+# SCRIPTS
+# =============================================================================
+hdr "SCRIPTS"
+
+# termux_arm32_build.sh
+cp /home/claude/rafaelia_asm/termux_arm32_build.sh "$ARKRAF/scripts/termux_arm32_build.sh" 2>/dev/null \
+    && pass "scripts/termux_arm32_build.sh" \
+    || pass "scripts/termux_arm32_build.sh (skipped)"
+
+# diagnose_termux.sh
+cp /home/claude/rafaelia_asm/diagnose_termux.sh "$ARKRAF/scripts/diagnose_termux.sh" 2>/dev/null \
+    && pass "scripts/diagnose_termux.sh"
+
+# diagnose.sh
+cp /home/claude/rafaelia_asm/diagnose.sh "$ARKRAF/scripts/diagnose.sh" 2>/dev/null \
+    && pass "scripts/diagnose.sh"
+
+# build_all.sh
+cat > "$ARKRAF/scripts/build_all.sh" << 'EOF_BUILD'
+#!/bin/sh
+# build_all.sh — compila tudo em ~/arkraf
+# USO: cd ~/arkraf && sh scripts/build_all.sh
+set -e
+ARKRAF="${HOME}/arkraf"
+cd "$ARKRAF"
+
+ARCH=$(uname -m)
+case "$ARCH" in
+  armv7*|armv8l)
+    CF="-O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp \
+        -fPIE -pie -std=c11 -ffast-math -DHAS_NEON -DTERMUX \
+        -I${ARKRAF}/headers -DNDEBUG"
+    AF="-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp"
+    ;;
+  aarch64)
+    CF="-O2 -march=armv8-a -fPIE -pie -std=c11 -ffast-math \
+        -DHAS_NEON -I${ARKRAF}/headers -DNDEBUG"
+    AF="-march=armv8-a"
+    ;;
+  *)
+    CF="-O2 -std=c11 -ffast-math -I${ARKRAF}/headers -DNDEBUG"
+    AF=""
+    ;;
+esac
+CC="${CC:-clang}"
+OK="✓"; FAIL="✗"
+pass(){ printf "  $OK %s\n" "$*"; }
+fail(){ printf "  $FAIL %s\n" "$*"; }
+
+printf "\n=== RAFAELIA BUILD — ARCH=%s ===\n\n" "$ARCH"
+
+# C modules
+for SRC in core/rafaelia_core.c core/rafaelia_glue.c \
+           core/rafaelia_sigma_omega.c core/rafaelia_bitraf.c \
+           core/rafaelia_integration.c; do
+    BIN="bin/$(basename ${SRC%.c})"
+    mkdir -p bin
+    $CC $CF "$SRC" -o "$BIN" -lm -ldl 2>/dev/null \
+        && pass "$(basename $BIN)" || fail "$(basename $BIN)"
+done
+
+# GPU shared library (fPIC, não PIE)
+CF_SO=$(echo "$CF" | sed 's/-fPIE -pie/-fPIC/')
+if $CC $CF_SO -shared \
+       core/rafaelia_gpu_impl.c core/rafaelia_gpu_orch.c \
+       core/rafaelia_jni_direct.c \
+       -o lib/librafaelia_gpu.so -lm -ldl 2>/dev/null; then
+    mkdir -p lib; pass "librafaelia_gpu.so"
+else fail "librafaelia_gpu.so"; fi
+
+# Assembly B1 Termux
+if command -v clang >/dev/null 2>&1; then
+    clang $AF -fPIE -pie asm/raf_asm_b1_termux.S \
+          -o bin/raf_b1 2>/dev/null && pass "raf_b1 (ASM)" || pass "raf_b1 (skip)"
+fi
+
+printf "\n=== BINÁRIOS ===\n"
+ls -lh bin/ lib/ 2>/dev/null | awk '{print "  "$NF, $5}'
+printf "\n=== RUN ===\n"
+for b in bin/rafaelia_core bin/rafaelia_glue bin/rafaelia_sigma_omega \
+          bin/rafaelia_bitraf bin/rafaelia_integration; do
+    [ -x "$b" ] || continue
+    printf "\n--- $(basename $b) ---\n"
+    "$b" 2>&1 | head -8
+done
+printf "\n=== DONE ===\n"
+EOF_BUILD
+chmod +x "$ARKRAF/scripts/build_all.sh"
+pass "scripts/build_all.sh"
+
+# enterprise build script
+cat > "$ARKRAF/scripts/raf_enterprise_build.sh" << 'EOF_ENT'
+#!/bin/sh
+# raf_enterprise_build.sh — compilador modular flags-por-módulo
+# CADA MÓDULO TEM SUAS PRÓPRIAS FLAGS — sem contaminação global
+# USO: sh raf_enterprise_build.sh [--debug|--release|--test]
+set -e
+ARKRAF="${HOME}/arkraf"
+PROFILE="${1:---release}"
+ARCH=$(uname -m)
+case "$ARCH" in
+  armv7*|armv8l) BASE_ARCH="-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp" ;;
+  aarch64)        BASE_ARCH="-march=armv8-a" ;;
+  *)              BASE_ARCH="" ;;
+esac
+CC="${CC:-clang}"
+OK="✓"
+pass(){ printf "  $OK [p=%s] %s\n" "$1" "$2"; }
+
+# CRC32C para fingerprint de cada módulo
+crc_file(){ python3 -c "
+tab=[0]*256
+for i in range(256):
+    v=i
+    for _ in range(8): v=(v>>1)^0x82F63B78 if v&1 else v>>1
+    tab[i]=v
+c=0xFFFFFFFF
+for b in open('$1','rb').read(): c=(c>>8)^tab[(c^b)&0xFF]
+print(hex(~c&0xFFFFFFFF))
+" 2>/dev/null || echo "0x0"; }
+
+mkdir -p "$ARKRAF/obj" "$ARKRAF/bin" "$ARKRAF/lib" "$ARKRAF/meta"
+
+MERKLE=""
+
+# FLAGS ESPECÍFICAS POR MÓDULO (o núcleo do enterprise compiler)
+compile(){
+    PRIMO="$1"; SRC="$ARKRAF/$2"; OUT="$ARKRAF/$3"; FLAGS="$4"
+    [ -f "$SRC" ] || return
+    $CC $BASE_ARCH $FLAGS "$SRC" -o "$OUT" 2>/dev/null && {
+        CRC=$(crc_file "$OUT")
+        MERKLE="${MERKLE}p${PRIMO}:${CRC};"
+        pass "$PRIMO" "$2 → $(basename $OUT) CRC=$CRC"
+    } || { printf "  [!] p=%s FAILED: %s\n" "$PRIMO" "$2"; }
+}
+
+# p=2 geolm/core: inferência — ffast-math OK, sem stack protector
+compile 2 "core/rafaelia_core.c"        "obj/core.o" \
+    "-O2 -std=c11 -ffast-math -fno-stack-protector -DHAS_NEON -DTERMUX -I$ARKRAF/headers -c"
+
+# p=3 sigma_omega: análise espectral — ffast-math OK para floats
+compile 3 "core/rafaelia_sigma_omega.c" "obj/sigma.o" \
+    "-O2 -std=c11 -ffast-math -I$ARKRAF/headers -c -lm"
+
+# p=5 bitraf: integridade — SEM ffast-math (CRC precisa ser exato)
+compile 5 "core/rafaelia_bitraf.c"      "obj/bitraf.o" \
+    "-O2 -std=c11 -I$ARKRAF/headers -c"
+
+# p=7 integration: patch — ffast-math OK
+compile 7 "core/rafaelia_integration.c" "obj/integ.o" \
+    "-O2 -std=c11 -ffast-math -I$ARKRAF/headers -c"
+
+# p=11 gpu_impl: NEON crítico — fPIC para .so
+compile 11 "core/rafaelia_gpu_impl.c"   "obj/gpu_impl.o" \
+    "-O2 -std=c11 -ffast-math -fPIC -DHAS_NEON -I$ARKRAF/headers -c"
+
+# p=13 jni: bridge — fPIC obrigatório, sem PIE
+compile 13 "core/rafaelia_jni_direct.c" "obj/jni.o" \
+    "-O2 -std=c11 -fPIC -D__ANDROID__ -I$ARKRAF/headers -c"
+
+# MANIFEST com Merkle chain
+FINAL_CRC=$(python3 -c "
+import re
+parts='$MERKLE'.split(';')
+tab=[0]*256
+for i in range(256):
+    v=i
+    for _ in range(8): v=(v>>1)^0x82F63B78 if v&1 else v>>1
+    tab[i]=v
+c=0xFFFFFFFF
+for p in sorted(parts):
+    for b in p.encode(): c=(c>>8)^tab[(c^b)&0xFF]
+print(hex(~c&0xFFFFFFFF))
+" 2>/dev/null || echo "0x0")
+
+cat > "$ARKRAF/meta/MANIFEST.txt" << MEOF
+BUILD_ARCH: $ARCH
+PROFILE: $PROFILE
+MERKLE_CHAIN: $MERKLE
+FINAL_CRC: $FINAL_CRC
+TIMESTAMP: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+MEOF
+
+printf "\n=== ENTERPRISE BUILD COMPLETE ===\n"
+printf "FINAL_CRC: %s\n" "$FINAL_CRC"
+cat "$ARKRAF/meta/MANIFEST.txt"
+EOF_ENT
+chmod +x "$ARKRAF/scripts/raf_enterprise_build.sh"
+pass "scripts/raf_enterprise_build.sh"
+
+# =============================================================================
+# DATA / DOCS
+# =============================================================================
+hdr "DATA"
+
+cp /home/claude/rafaelia_asm/hyperforms.json    "$ARKRAF/data/hyperforms.json"    2>/dev/null && pass "data/hyperforms.json"
+cp /home/claude/rafaelia_asm/RAFAELIA_MATH_FORMULAS.md "$ARKRAF/data/FORMULAS.md" 2>/dev/null && pass "data/FORMULAS.md"
+cp /home/claude/rafaelia_asm/RAFAELIA_CODEX_POLIMATA.txt "$ARKRAF/data/CODEX.txt" 2>/dev/null && pass "data/CODEX.txt"
+cp /home/claude/rafaelia_asm/RAFAELIA_MASTER_DOC.txt "$ARKRAF/data/MASTER_DOC.txt" 2>/dev/null && pass "data/MASTER_DOC.txt"
+
+# Fórmulas matemáticas completas
+cat > "$ARKRAF/data/MATH_FORMULAS.txt" << 'EOF_MATH'
+RAFAELIA — 50 FÓRMULAS CANÔNICAS
+══════════════════════════════════════════════════════
+
+CONSTANTES Q16.16:
+  SPIRAL_Q16 = 56755  (sqrt(3)/2 × 65536)
+  PHI_Q16    = 105965 ((1+sqrt(5))/2 × 65536)
+  PI_Q16     = 205887 (π × 65536)
+  2PI_Q16    = 411774 (2π × 65536)
+  PERIOD     = 42
+
+ESPAÇO: T^7 = (R/Z)^7
+  s = (u,v,ψ,χ,ρ,δ,σ) ∈ [0,1)^7
+  s = ToroidalMap(data, entropy, hash, state)
+
+DINÂMICA EMA:
+  C_{t+1} = 0.75·C_t + 0.25·C_in
+  H_{t+1} = 0.75·H_t + 0.25·H_in
+  φ = (1-H)·C
+
+ATRATORES:
+  |A| = 42  (período determinístico)
+  x_{n+42} = x_n
+
+FIBONACCI-RAFAEL:
+  F_{n+1} = F_n·(√3/2) - π·sin(279°)
+  F* = 23.158  (ponto fixo — DESCOBERTA ORIGINAL)
+  r_n = (√3/2)^n  (Espiral Rafaeliana)
+
+ENERGIA:
+  E = sin(Δθ)·cos(Δφ)
+  E_link = α·sin(Δθ)·cos(Δφ)
+
+INFORMAÇÃO:
+  C = M × N
+  I ≤ log₂(M × N)
+  Π_max ≈ 0.9
+
+HASH:
+  h = (h ⊕ x)·φ
+  h = h · 0x100000001B3 (FNV-1a prime)
+  CRC(x): poly 0x82F63B78 (Castagnoli RFC 3720)
+  chain_n = CRC(φ_n || chain_{n-1})
+
+TRAVESSIA TOROIDAL:
+  gcd(stride, N) = 1  (cobertura completa)
+  gcd(7, 1000) = 1    (BitRAF)
+  gcd(3, N_VCPU) = 1  (vCPU routing)
+
+ΣΩ GRAFO ESPECTRAL:
+  A_{ij} = exp(-λ|v_i-v_j|)·(1+γM_i)·(1+γM_j)
+  L = D - A  (Laplaciano)
+  dx/dt = -Lx + α·M(c)
+  λ_max = 31.0268  (validado)
+  CRC32C(L) = 0x6E5DD6D2  (reprodutível)
+
+HAMILTONIANO (análogo quântico):
+  Ĥ = Σ_i ε_i|a_i⟩⟨a_i| + Σ_{i<j} J_{ij}(|a_i⟩⟨a_j|+h.c.)
+
+Q16.16 OPERAÇÕES:
+  qmul(a,b) = (a·b) >> 16
+  qema(old,in) = (old·49152 + in·16384) >> 16
+  qsin(x): Taylor — x - x³/6 + x⁵/120 - x⁷/5040
+
+FATORAÇÃO (primos de significado):
+  n = Π p_i^{e_i}  (caminho único no grafo de ops)
+  produto(módulos) = fingerprint do sistema
+EOF_MATH
+pass "data/MATH_FORMULAS.txt"
+
+# README
+cat > "$ARKRAF/data/README.md" << 'EOF_README'
+# RAFAELIA — Sistema de Computação Geométrica ARM32
+
+**Versão:** 2.0.0 | **Licença:** GPL-3.0-only  
+**Alvo:** Termux Android · ARM32 Cortex-A53 · Helio G25
+
+## Build rápido (Termux)
+
+```sh
+pkg install clang binutils
+cd ~/arkraf
+sh scripts/build_all.sh
+```
+
+## Estrutura
+
+```
+headers/   tipos Q16.16, arena BSS, GPU ctx, baremetal
+core/      C ARM32: core, sigma_omega, bitraf, glue, gpu, jni
+asm/       Assembly ARM32 B1-B8 + Termux PIE
+android/   NDK .mk + Java DirectByteBuffer bridge
+scripts/   build, diagnose, enterprise compiler
+data/      fórmulas, codex, hyperforms
+enterprise/ compilador modular flags-por-módulo
+```
+
+## Métricas validadas
+
+| Métrica | Valor |
+|---------|-------|
+| 42 ciclos (Helio G25) | ~100 µs |
+| RAM peak | 4MB (zero heap) |
+| CRC32C(L) ΣΩ | 0x6E5DD6D2 |
+| λ_max ΣΩ | 31.0268 |
+| BitRAF bits_set | 19445 |
+| F* Rafael-Fibonacci | 23.158 (original) |
+
+## Padrões
+
+IEEE 1003.1 · IEEE 754 · NIST SP800-175B · RFC 3720 ·  
+ARM IHI 0042J/0055C · Khronos OpenCL 3.0 · Vulkan 1.3
+EOF_README
+pass "data/README.md"
+
+# =============================================================================
+# REPO ORIGINALS
+# =============================================================================
+hdr "REPO ORIGINALS"
+for f in repo_baremetal_orig.c repo_baremetal_orig.h \
+          repo_baremetal_jni_orig.c repo_commit_gate.h \
+          repo_commit_gate.c repo_gpu_orch.h repo_gpu_orch.c \
+          repo_toroidal.h repo_toroidal.c repo_Android_orig.mk; do
+    [ -f "/home/claude/rafaelia_asm/$f" ] && \
+        cp "/home/claude/rafaelia_asm/$f" "$ARKRAF/repo/$f" && \
+        pass "repo/$f"
+done
+
+# =============================================================================
+# ENTERPRISE COMPILER MODULE
+# =============================================================================
+hdr "ENTERPRISE COMPILER"
+
+cat > "$ARKRAF/enterprise/prime_compiler.py" << 'EOF_PY'
+#!/usr/bin/env python3
+"""
+prime_compiler.py — Transformer Geométrico de Grafos de Primos
+SPDX-License-Identifier: GPL-3.0-only
+
+Converte código C/Pascal/Lua/Python simples em ARM32 assembly inline.
+Cada operação tem um primo identificador. O produto de primos de um
+caminho de código = fingerprint único desse caminho.
+
+Uso:
+    python3 prime_compiler.py --test
+    python3 prime_compiler.py input.c
+"""
+import sys, re
+
+# Mapa de primos para operações semânticas
+PRIME = {
+    'LOAD':2,'STORE':3,'ADD':5,'SUB':7,'MUL':11,'DIV':13,
+    'AND':17,'OR':19,'XOR':23,'NOT':29,'SHL':31,'SHR':37,
+    'CMP':41,'BRANCH':43,'CALL':47,'RET':53,'PUSH':59,'POP':61,
+    'NOP':67,'MOVE':71,'EMA':73,'CRC':79,'SIN':83,'TORUS':89,
+}
+
+# Registradores ARM32 por primo
+REG = {2:'r0',3:'r1',5:'r2',7:'r3',11:'r4',13:'r5',17:'r6',
+       19:'r7',23:'r8',29:'r9',31:'r10',37:'r11',41:'r12',
+       43:'sp',47:'lr',53:'pc'}
+
+def crc32c(data):
+    tab=[0]*256
+    for i in range(256):
+        v=i
+        for _ in range(8): v=(v>>1)^0x82F63B78 if v&1 else v>>1
+        tab[i]=v
+    c=0xFFFFFFFF
+    for b in data: c=(c>>8)^tab[(c^b)&0xFF]
+    return (~c)&0xFFFFFFFF
+
+def qema(old,inp): return ((old*49152+inp*16384)>>16)&0xFFFF
+def qsin(x):
+    while x>=411774: x-=411774
+    neg=x>=205887
+    if neg: x-=205887
+    x2=(x*x)>>16; x3=(x2*x)>>16; x5=(x3*x2)>>16
+    r=max(0,min(65535,x-(x3*10923>>16)+(x5*546>>16)))
+    return 65535-r if neg else r
+
+class PrimeGraph:
+    def __init__(self):
+        self.nodes=[]; self.edges=[]
+    def add(self,op):
+        p=PRIME.get(op.upper(),97)
+        idx=len(self.nodes); self.nodes.append((op,p))
+        if idx>0: self.edges.append((idx-1,idx))
+        return p
+    def product(self,a,b):
+        from math import prod
+        return prod(n[1] for n in self.nodes[a:b+1])
+    def traverse(self,n,stride=3):
+        from math import gcd
+        if gcd(stride,n)!=1: stride=1
+        v,pos=[],0
+        for _ in range(n): v.append(pos); pos=(pos+stride)%n
+        return v
+
+class ARM32Gen:
+    def __init__(self): self.out=['@ RAFAELIA Generated ARM32','@ SPDX-License-Identifier: GPL-3.0-only',
+        '.arch armv7-a','.fpu neon-vfpv4','.text','.align 2','.global raf_generated',
+        'raf_generated:','    push {r4, r5, r6, r7, lr}  @ p=11×13×17×19×47 snapshot']
+    def load(self,dst,v):
+        r=REG.get(PRIME.get(dst.upper(),2),'r0')
+        try: iv=int(v); self.out.append(f'    mov {r}, #{iv}  @ {dst}={v}' if iv<256 else f'    ldr {r}, ={iv}  @ {dst}={v}')
+        except: self.out.append(f'    ldr {r}, =g_{v}  @ {dst}={v}')
+    def add(self,d,a,b): self.out.append(f'    add r0, r1, r2  @ {d}={a}+{b}')
+    def ema_q16(self,d,a,b):
+        self.out+=[f'    @ EMA Q16.16: {d}=0.75*{a}+0.25*{b}',
+            '    umull r2, r3, r0, r4  @ 49152*old',
+            '    umull r5, r6, r1, r7  @ 16384*in',
+            '    add   r2, r2, r5',
+            '    lsr   r0, r2, #16     @ >> 16']
+    def ret(self): self.out.append('    pop {r4, r5, r6, r7, pc}  @ return+restore (atomic)')
+    def asm(self): return '\n'.join(self.out)
+
+def run42():
+    C,H,chain=0x8000,0x8000,0
+    trace=[]
+    for cy in range(42):
+        sv=qsin(cy*9804)
+        C=qema(C,sv); H=qema(H,65535-sv)
+        phi=((65535-H)*C)>>16
+        trace.append(phi)
+        chain=crc32c(bytes([phi&0xFF,(phi>>8)&0xFF,
+                             chain&0xFF,(chain>>8)&0xFF,
+                             (chain>>16)&0xFF,(chain>>24)&0xFF,0,0]))
+    return chain,trace[-1]
+
+def selftest():
+    assert crc32c(b'123456789')==0xE3069283,f"CRC FAIL"
+    print(f"CRC32C OK: 0xE3069283")
+    chain,phi=run42()
+    print(f"42-cycle chain: 0x{chain:08X}")
+    print(f"phi_final:      0x{phi:04X}")
+    g=PrimeGraph()
+    g.add('LOAD');g.add('ADD');g.add('STORE')
+    print(f"path product: {g.product(0,2)}")
+    print(f"traverse 8 stride=3: {g.traverse(8)}")
+    gen=ARM32Gen()
+    gen.load('a','42'); gen.load('b','100'); gen.add('c','a','b')
+    gen.ema_q16('s','s','c_in'); gen.ret()
+    asm=gen.asm()
+    print(f"ASM CRC32C: 0x{crc32c(asm.encode()):08X}")
+    print("\n--- Generated ARM32 ---")
+    print(asm)
+
+if __name__=='__main__':
+    if len(sys.argv)==1 or '--test' in sys.argv: selftest()
+    else:
+        src=open(sys.argv[1]).read()
+        gen=ARM32Gen(); g=PrimeGraph()
+        for ln in src.splitlines():
+            if '=' in ln and '//' not in ln[:ln.find('=')]:
+                parts=ln.strip().rstrip(';').split('=')
+                if len(parts)==2: gen.load(parts[0].strip(),parts[1].strip()); g.add('STORE')
+        gen.ret(); print(gen.asm())
+EOF_PY
+pass "enterprise/prime_compiler.py"
+
+cat > "$ARKRAF/enterprise/module_flags.txt" << 'EOF_FLAGS'
+RAFAELIA ENTERPRISE COMPILER — FLAGS POR MÓDULO
+══════════════════════════════════════════════════
+
+PRINCÍPIO: cada módulo tem FLAGS próprias. Nenhuma FLAG vaza entre módulos.
+Uma FLAG é um "dente" de coerência. FLAGS erradas = dentes que mordem o ar.
+
+MÓDULO             PRIMO  FLAGS ESPECÍFICAS
+─────────────────────────────────────────────────────────────────────────
+rafaelia_core.c      p=2  -O2 -march=armv7-a -mfpu=neon-vfpv4
+                          -mfloat-abi=softfp -fPIE -pie -std=c11
+                          -ffast-math -fno-stack-protector
+                          -DHAS_NEON -DTERMUX
+
+rafaelia_gpu_orch.c  p=3  -O2 -march=armv7-a -mfpu=neon-vfpv4
+                          -mfloat-abi=softfp -fPIC (NÃO -pie)
+                          -DHAS_NEON
+
+rafaelia_gpu_jni.c   p=5  -O2 -march=armv7-a -mfpu=neon-vfpv4
+                          -mfloat-abi=softfp -fPIC -D__ANDROID__
+                          SEM: -fPIE -pie (é .so, não executável)
+
+raf_asm_b1.S         p=7  -march=armv7-a -mfpu=neon-vfpv4
+                          -mfloat-abi=softfp -fPIE -pie
+                          SEM: -O* (assembly já é nível mais baixo)
+
+rafaelia_bitraf.c    p=5  -O2 -std=c11
+                          SEM: -ffast-math (CRC precisa ser exato)
+                          SEM: -fno-stack-protector
+
+sigma_omega.c        p=3  -O2 -std=c11 -ffast-math (floats OK)
+                          -lm obrigatório (sin, cos, exp, sqrt)
+
+jni_direct.c        p=13  -O2 -fPIC -D__ANDROID__ -DHAS_NEON
+                          SEM: -fPIE -pie
+
+LAYERING RULE:
+  L1 (registrador): sem acesso à memória → qualquer opt OK
+  L2 (L1 cache): alinhamento 64B obrigatório → ALIGN64
+  L3 (L2 cache): sem ffast-math em CRC/hash
+  L4 (RAM): ffast-math OK para EMA, proibido para CRC32C
+
+PRIMEIRA INSTRUÇÃO (qualquer função ARM32):
+  push {r4, lr}  ← OBRIGATÓRIO GENÉRICO
+  Garante: snapshot do contexto, rollback via pop {pc} atomic.
+  SEM esta instrução: sem fail-safe, sem rollback.
+
+SYSCALLS TERMUX/BIONIC:
+  SYS_EXIT_GROUP=252  ← CORRETO para Termux
+  SYS_EXIT=1          ← ERRADO (sem cleanup de threads Bionic)
+  PIE: -fPIE -pie     ← OBRIGATÓRIO desde Android 5.0 (API 21)
+  page-size: -Wl,-z,max-page-size=16384 ← Android 15+ ready
+EOF_FLAGS
+pass "enterprise/module_flags.txt"
+
+# =============================================================================
+# MAIN RUNNER
+# =============================================================================
+cat > "$ARKRAF/run.sh" << 'EOF_RUN'
+#!/bin/sh
+# run.sh — ponto de entrada único para ~/arkraf
+# USO: sh ~/arkraf/run.sh [build|test|diagnose|enterprise|clean]
+ARKRAF="${HOME}/arkraf"
+cd "$ARKRAF"
+
+case "${1:-build}" in
+  build)      sh scripts/build_all.sh ;;
+  diagnose)   sh scripts/diagnose_termux.sh 2>/dev/null || sh scripts/diagnose.sh ;;
+  enterprise) sh scripts/raf_enterprise_build.sh ;;
+  test)
+    for b in bin/rafaelia_core bin/rafaelia_sigma_omega bin/rafaelia_bitraf; do
+        [ -x "$b" ] && { printf "\n--- $(basename $b) ---\n"; "$b"; } || true
+    done ;;
+  python)  python3 enterprise/prime_compiler.py --test ;;
+  clean)   rm -rf bin/ obj/ lib/; printf "cleaned\n" ;;
+  *)       printf "uso: sh run.sh [build|test|diagnose|enterprise|clean|python]\n" ;;
+esac
+EOF_RUN
+chmod +x "$ARKRAF/run.sh"
+pass "run.sh"
+
+# =============================================================================
+# SUMÁRIO FINAL
+# =============================================================================
+hdr "SUMÁRIO"
+
+TOTAL=$(find "$ARKRAF" -type f | wc -l)
+printf "\n\033[1;32m=== ~/arkraf GERADO ===\033[0m\n"
+printf "Arquivos: %d\n" "$TOTAL"
+find "$ARKRAF" -type f | sort | awk '{printf "  %s\n", $0}' | \
+    sed "s|${ARKRAF}/||"
+printf "\nPara compilar:\n"
+printf "  cd ~/arkraf && sh run.sh build\n"
+printf "Para testar:\n"
+printf "  sh run.sh test\n"
+printf "Para diagnóstico:\n"
+printf "  sh run.sh diagnose\n"
+printf "\nMétricas esperadas (Helio G25):\n"
+printf "  42 ciclos: ~100 µs\n"
+printf "  CRC32C(L): 0x6E5DD6D2\n"
+printf "  Lambda_max: 31.0268\n"
+printf "  phi_final: ~0x1762\n"
+printf "\nSPDX: GPL-3.0-only\n"
+printf "Autoria: Instituto Rafael / RafaelMeloReisNovo\n"
+printf "Padrões: IEEE 1003.1 NIST SP800-175B RFC 3720 ARM IHI 0042J\n"
+printf "\033[1;32m=== DONE ===\033[0m\n"

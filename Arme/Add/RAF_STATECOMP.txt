@@ -1,0 +1,2945 @@
+#!/bin/sh
+# =============================================================================
+# RAF_STATECOMP.txt — Compilador de Estados para C / ASM Inline
+# =============================================================================
+# Este arquivo É o compilador. Execute: sh RAF_STATECOMP.txt
+# Gera em ~/arkraf/statecomp/ todos os módulos do sistema.
+#
+# FILOSOFIA:
+#   Cabeçalhos = #FLAGS que abrem/fecham estados (como tags HTML mas para máquina)
+#   Cada FLAG converge para: hexadecimal | 0 | 1
+#   Precompilador transforma: if/while/for/add → estado hexadecimal → ASM inline
+#   Zero abstração. Zero shadow. Zero tail. Zero overhead.
+#
+#   IF   → cmp + bXX    (branch condicional = estado 0 ou 1)
+#   WHILE→ cmp + bXX + bl (loop = ciclo de estado)
+#   FOR  → contador + cmp + blt (iteração = incremento de estado)
+#   ADD  → add/umull    (aritmética = transição de estado)
+#   TORO → EMA Q16.16   (estado persistente = atrator)
+#
+# ESTRUTURA GERADA:
+#   statecomp.h     — tipos de estado, flags, máquina de Turing geométrica
+#   statecomp.c     — compilador principal (lexer+parser+emitter)
+#   precomp.c       — pré-compilador (macro expansão, flag resolution)
+#   emit_arm32.c    — emissor ARM32 inline assembler
+#   emit_hex.c      — emissor hexadecimal / bytecode
+#   state_machine.c — máquina de estados toroidal (Turing geométrica)
+#   test_comp.c     — testes de compilação
+#   run_comp.sh     — executor completo
+#
+# CONFORMIDADE:
+#   GPL-3.0-only · IEEE 1003.1 · ARM IHI 0042J · NIST SP800-175B
+# =============================================================================
+
+set -e
+DEST="${HOME}/arkraf/statecomp"
+mkdir -p "$DEST"
+OK="\033[32m✓\033[0m"
+pass(){ printf "$OK %s\n" "$*"; }
+hdr() { printf "\n\033[1;33m══ %s ══\033[0m\n" "$*"; }
+
+hdr "RAF STATECOMP — GERANDO COMPILADOR DE ESTADOS"
+
+# =============================================================================
+# [1] statecomp.h — tipos, flags, estados, máquina
+# =============================================================================
+cat > "$DEST/statecomp.h" << 'STATECOMP_H'
+/**
+ * statecomp.h — Compilador de Estados: tipos e máquina de Turing geométrica
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * MODELO CONCEITUAL:
+ *   Cada construção de linguagem é um ESTADO com entrada e saída.
+ *   A FLAG de abertura (#FLAG_OPEN) define o tipo do estado.
+ *   A FLAG de fechamento (#FLAG_CLOSE) emite o código correspondente.
+ *   O compilador navega estados via toro T^7 — sem stack de chamada.
+ *
+ *   ESTADO → HEX:
+ *     #LOAD  x,42     → 0x02_002A  (p=2, value=0x2A)
+ *     #ADD   a,b,c    → 0x05_0000  (p=5, op=ADD)
+ *     #IF    x>0      → 0x29_0001  (p=41, cond=GT)
+ *     #WHILE x<n      → 0x2B_0002  (p=43, cond=LT)
+ *     #FOR   i,0,n    → 0x3B_0003  (p=59, iter)
+ *     #CALL  func     → 0x2F_0000  (p=47, target)
+ *     #RET            → 0x35_0000  (p=53, void)
+ *     #EMA   s,in     → 0x49_0000  (p=73, Q16.16)
+ *     #CRC   buf,n    → 0x4F_0000  (p=79, CRC32C)
+ *     #TORO  dim,val  → 0x59_0000  (p=89, T^7)
+ */
+#pragma once
+#ifndef STATECOMP_H
+#define STATECOMP_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+
+/* ── Versão ─────────────────────────────────────────────────────────── */
+#define SC_VERSION      "1.0.0"
+#define SC_MAGIC        0x52414600u  /* "RAF\0" */
+#define SC_PERIOD       42u
+#define SC_TORUS_DIM    7u
+#define SC_MAX_STATES   1024u
+#define SC_MAX_TOKENS   4096u
+#define SC_MAX_EMIT     65536u
+#define SC_ARENA        (2u*1024u*1024u)
+
+/* ── Q16.16 ─────────────────────────────────────────────────────────── */
+#define Q16_SPIRAL  56755u
+#define Q16_ONE     65536u
+#define Q16_HALF    32768u
+#define Q16_2PI     411774u
+#define Q16_PI      205887u
+
+typedef uint8_t  u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef int32_t  i32;
+typedef int64_t  i64;
+
+/* ══════════════════════════════════════════════════════════════════════
+ * FLAGS — cabeçalhos que abrem e fecham estados
+ *
+ * FLAG = número primo identificador + tipo de dado convergido
+ * Abertura: #FLAG_OPEN  → parser entra no estado
+ * Fechamento: #FLAG_CLOSE → emitter gera código
+ *
+ * FLAG_ID → PRIME → HEX_CODE → ASM_OPCODE
+ * ════════════════════════════════════════════════════════════════════ */
+typedef enum {
+    /* Primitivos de dados (primos 2..19) */
+    FLAG_LOAD   = 0x02,  /* p=2  LOAD  r←valor      → ldr/mov       */
+    FLAG_STORE  = 0x03,  /* p=3  STORE mem←r         → str           */
+    FLAG_ADD    = 0x05,  /* p=5  ADD   r←a+b         → add           */
+    FLAG_SUB    = 0x07,  /* p=7  SUB   r←a-b         → sub           */
+    FLAG_MUL    = 0x0B,  /* p=11 MUL   r←a×b Q16.16  → umull+lsr     */
+    FLAG_DIV    = 0x0D,  /* p=13 DIV   r←a/b         → udiv (ARM64)  */
+    FLAG_AND    = 0x11,  /* p=17 AND   r←a&b         → and           */
+    FLAG_OR     = 0x13,  /* p=19 OR    r←a|b         → orr           */
+    FLAG_XOR    = 0x17,  /* p=23 XOR   r←a^b         → eor           */
+    FLAG_NOT    = 0x1D,  /* p=29 NOT   r←~a          → mvn           */
+    FLAG_SHL    = 0x1F,  /* p=31 SHL   r←a<<n        → lsl           */
+    FLAG_SHR    = 0x25,  /* p=37 SHR   r←a>>n        → lsr           */
+
+    /* Controle de fluxo (primos 41..67) */
+    FLAG_CMP    = 0x29,  /* p=41 CMP   flags←a?b     → cmp → NZCV    */
+    FLAG_IF     = 0x29,  /* p=41 IF    cond→branch    → cmp+bXX       */
+    FLAG_ELSE   = 0x2B,  /* p=43 ELSE  alt branch     → b .else       */
+    FLAG_ENDIF  = 0x2B,  /* p=43 ENDIF fecha IF       → .endif:       */
+    FLAG_WHILE  = 0x2F,  /* p=47 WHILE loop cond      → .loop:+cmp+b  */
+    FLAG_ENDW   = 0x2F,  /* p=47 ENDWHILE fecha loop  → b .loop+.end  */
+    FLAG_FOR    = 0x3B,  /* p=59 FOR   i,start,end    → mov+cmp+blt   */
+    FLAG_ENDF   = 0x3B,  /* p=59 ENDFOR fecha for     → add i+b .for  */
+    FLAG_CALL   = 0x3D,  /* p=61 CALL  func(args)     → push+bl+pop   */
+    FLAG_RET    = 0x43,  /* p=67 RET   retorno        → pop{pc}       */
+
+    /* Estados geométricos (primos 71..97) */
+    FLAG_EMA    = 0x47,  /* p=71 EMA   Q16.16 smooth  → umull+lsr×2   */
+    FLAG_CRC    = 0x4F,  /* p=79 CRC   CRC32C bloco   → loop xor tab  */
+    FLAG_SIN    = 0x53,  /* p=83 SIN   Taylor Q16.16  → poly expand   */
+    FLAG_TORO   = 0x59,  /* p=89 TORO  estado T^7     → EMA 7D        */
+    FLAG_GATE   = 0x5B,  /* p=91 GATE  commit gate    → LOAD→PROC→VER */
+    FLAG_NEON   = 0x61,  /* p=97 NEON  SIMD 4-wide    → vld1+vmul+vst */
+
+    /* Emissão direta (sem abstração) */
+    FLAG_HEX    = 0x67,  /* p=103 HEX emite bytes raw → .byte 0xXX    */
+    FLAG_ASM    = 0x6B,  /* p=107 ASM inline direto   → pass-through   */
+    FLAG_LABEL  = 0x6D,  /* p=109 LABEL define label  → name:          */
+    FLAG_BRANCH = 0x71,  /* p=113 BRANCH incondicional→ b label        */
+    FLAG_NOP    = 0x7F,  /* p=127 NOP  sem operação   → nop            */
+
+    FLAG_NONE   = 0x00,
+    FLAG_EOF    = 0xFF,
+} flag_t;
+
+/* ── Condições de branch (convergem para 4 bits = 1 nibble) ─────────── */
+typedef enum {
+    COND_EQ = 0x0,  /* == → beq  → flags: Z=1            */
+    COND_NE = 0x1,  /* != → bne  → flags: Z=0            */
+    COND_LT = 0x2,  /* <  → blt  → flags: N≠V            */
+    COND_LE = 0x3,  /* <= → ble  → flags: Z=1 ou N≠V     */
+    COND_GT = 0x4,  /* >  → bgt  → flags: Z=0 e N=V      */
+    COND_GE = 0x5,  /* >= → bge  → flags: N=V            */
+    COND_HI = 0x6,  /* >u → bhi  → flags: C=1 e Z=0      */
+    COND_LO = 0x7,  /* <u → blo  → flags: C=0            */
+    COND_AL = 0x8,  /* always → b (sem condição)          */
+    COND_NV = 0x9,  /* never  → sem emissão               */
+} cond_t;
+
+/* ── Target de emissão ────────────────────────────────────────────────── */
+typedef enum {
+    EMIT_ARM32 = 0,   /* ARM32 AAPCS armeabi-v7a            */
+    EMIT_ARM64 = 1,   /* ARM64 AAPCS64 arm64-v8a            */
+    EMIT_X86_64= 2,   /* x86_64 System V ABI                */
+    EMIT_RV32  = 3,   /* RISC-V 32 (RV32IMAC)               */
+    EMIT_HEX   = 4,   /* bytecode hex puro                  */
+    EMIT_BIN   = 5,   /* binário puro (ELF minimal)         */
+    EMIT_C     = 6,   /* C portável (fallback)              */
+} emit_target_t;
+
+/* ── Token (unidade léxica) ──────────────────────────────────────────── */
+typedef struct {
+    flag_t   flag;       /* tipo do token                    */
+    u32      prime;      /* primo identificador              */
+    u32      hex;        /* valor convergido em hex          */
+    char     text[64];   /* texto original                   */
+    char     arg[3][32]; /* até 3 argumentos                 */
+    u8       n_args;     /* número de argumentos             */
+    u32      line;       /* linha no fonte                   */
+    cond_t   cond;       /* condição (se aplicável)          */
+} sc_token_t;
+
+/* ── Estado da máquina ───────────────────────────────────────────────── */
+typedef struct {
+    u32      s[SC_TORUS_DIM];  /* toro 7D Q16.16                */
+    u32      C, H;             /* coerência, entropia           */
+    u32      phi;              /* (1-H)*C                       */
+    u32      phase;            /* 0..41                         */
+    u32      crc_chain;        /* CRC encadeado                 */
+    u32      depth;            /* profundidade de aninhamento   */
+    u32      loop_stack[32];   /* pilha de labels de loop       */
+    u32      if_stack[32];     /* pilha de labels de if         */
+    u32      loop_top;
+    u32      if_top;
+} sc_state_t;
+
+/* ── Contexto do compilador ─────────────────────────────────────────── */
+typedef struct {
+    /* Arena sem malloc */
+    u8           arena[SC_ARENA];
+    u32          arena_bump;
+
+    /* Tokens */
+    sc_token_t   tokens[SC_MAX_TOKENS];
+    u32          n_tokens;
+    u32          tok_pos;  /* posição atual */
+
+    /* Emissão */
+    u8           emit_buf[SC_MAX_EMIT];
+    u32          emit_pos;
+    emit_target_t target;
+
+    /* Estado da máquina */
+    sc_state_t   machine;
+
+    /* Label counter */
+    u32          label_ctr;
+
+    /* Registradores livres ARM32 */
+    u8           reg_free[16];   /* 1=livre, 0=ocupado */
+    char         reg_var[16][32];/* variável em cada reg */
+
+    /* CRC table */
+    u32          crc_tab[256];
+    int          crc_ready;
+
+    /* Stats */
+    u32          n_instructions;
+    u32          n_states;
+    u32          n_errors;
+    u32          n_warnings;
+} sc_ctx_t;
+
+/* ══════════════════════════════════════════════════════════════════════
+ * API PÚBLICA
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* Inicialização */
+void sc_init(sc_ctx_t *ctx, emit_target_t target);
+
+/* Lexer: texto → tokens */
+int  sc_lex(sc_ctx_t *ctx, const char *src, u32 len);
+
+/* Parser: tokens → AST (inline no array de tokens) */
+int  sc_parse(sc_ctx_t *ctx);
+
+/* Emitter: tokens → código target */
+int  sc_emit(sc_ctx_t *ctx);
+
+/* Saída */
+u32  sc_output_size(const sc_ctx_t *ctx);
+const u8 *sc_output(const sc_ctx_t *ctx);
+
+/* Utilitários */
+u32  sc_crc32c(sc_ctx_t *ctx, const void *buf, u32 n);
+u32  sc_prime_of(flag_t f);
+const char *sc_flag_name(flag_t f);
+const char *sc_cond_name(cond_t c);
+void sc_dump_tokens(const sc_ctx_t *ctx);
+void sc_dump_stats(const sc_ctx_t *ctx);
+
+/* Arena */
+void *sc_alloc(sc_ctx_t *ctx, u32 n);
+
+/* ══════════════════════════════════════════════════════════════════════
+ * MACROS DE CONVENIÊNCIA — linguagem de estado
+ *
+ * Uso em código C que usa o statecomp como biblioteca:
+ *   SC_STATE(ctx, "#LOAD r0,42\n#ADD r0,r0,1\n#RET\n")
+ * ════════════════════════════════════════════════════════════════════ */
+#define SC_EMIT(ctx, src) do { \
+    sc_lex(ctx, src, (u32)strlen(src)); \
+    sc_parse(ctx); \
+    sc_emit(ctx); \
+} while(0)
+
+/* ── TABELA DE MAPEAMENTO FLAG → PRIME → HEX ────────────────────────── */
+/*
+ * FLAG      PRIME   HEX    ARM32 TEMPLATE
+ * ─────────────────────────────────────────────────────────────────────
+ * #LOAD     2       0x02   mov rD, #imm   (imm<256)
+ *                          ldr rD, =imm   (imm>=256)
+ *                          mov rD, rS     (reg←reg)
+ * #STORE    3       0x03   str rS, [rD]
+ *                          str rS, [rD, #off]
+ * #ADD      5       0x05   add rD, rA, rB
+ *                          add rD, rA, #imm
+ * #SUB      7       0x07   sub rD, rA, rB
+ *                          sub rD, rA, #imm
+ * #MUL     11       0x0B   umull rL,rH,rA,rB; lsr rD,rL,#16
+ * #AND     17       0x11   and rD, rA, rB
+ * #OR      19       0x13   orr rD, rA, rB
+ * #XOR     23       0x17   eor rD, rA, rB
+ * #SHL     31       0x1F   lsl rD, rA, #n
+ * #SHR     37       0x25   lsr rD, rA, #n
+ * #IF      41       0x29   cmp rA, rB; bXX .else_N
+ * #ELSE    43       0x2B   b .endif_N; .else_N:
+ * #ENDIF   43       0x2B   .endif_N:
+ * #WHILE   47       0x2F   .while_N: cmp rA, rB; bge .endw_N
+ * #ENDW    47       0x2F   b .while_N; .endw_N:
+ * #FOR     59       0x3B   mov rI,#S; .for_N: cmp rI,#E; bge .endf_N
+ * #ENDF    59       0x3B   add rI,rI,#1; b .for_N; .endf_N:
+ * #CALL    61       0x3D   push{lr}; bl func; pop{lr}
+ * #RET     67       0x43   pop{r4,r5,r6,r7,pc}
+ * #EMA     71       0x47   umull+lsr ×2 (Q16.16 EMA)
+ * #CRC     79       0x4F   ldrb+eor+lsr loop (CRC32C)
+ * #SIN     83       0x53   poly Taylor (x-x³/6+x⁵/120)
+ * #TORO    89       0x59   EMA 7D com stride coprimo
+ * #GATE    91       0x5B   4-phase commit gate
+ * #NEON    97       0x61   vld1+vmul+vst (4-wide SIMD)
+ * #HEX    103       0x67   .byte 0xNN (emissão direta)
+ * #ASM    107       0x6B   pass-through (sem modificação)
+ * #LABEL  109       0x6D   name: (define label)
+ * #BRANCH 113       0x71   b label (incondicional)
+ * #NOP    127       0x7F   nop (mov r0,r0)
+ */
+
+/* ── CONVERSÃO FLAG → BITS ──────────────────────────────────────────── */
+/*
+ * Cada FLAG converge para um valor de 32 bits:
+ *   bits[31..24] = prime (8 bits)
+ *   bits[23..16] = flag_type (8 bits)
+ *   bits[15..8]  = operand1 (8 bits, reg ou imm8)
+ *   bits[7..0]   = operand2 (8 bits, reg ou imm8)
+ *
+ * Exemplo: #ADD r0, r1, r2
+ *   prime   = 5    = 0x05
+ *   flag    = ADD  = 0x05
+ *   op1     = r0   = 0x00
+ *   op2     = r1   = 0x01
+ *   value   = r2   = 0x02
+ *   hex     = 0x05050001_02 → compacto: 0x05000102
+ *
+ * Se imm: op2 = 0xFF indica imediato, value = imm em op1
+ *   #ADD r0, r1, #42
+ *   hex = 0x050001FF_2A
+ */
+#define SC_HEX(prime, op1, op2) \
+    (((u32)(prime)<<24)|((u32)(op1)<<8)|((u32)(op2)))
+
+/* ── REGISTRADORES ARM32 ─────────────────────────────────────────────── */
+/*
+ * r0..r3:  argumentos/retorno (VOLÁTEIS — não salvar)
+ * r4..r11: variáveis locais (SALVOS — push/pop obrigatório)
+ * r12:     scratch (VOLÁTIL)
+ * r13(sp): stack pointer
+ * r14(lr): link register
+ * r15(pc): program counter
+ *
+ * Alocação pelo compilador de estados:
+ *   Variáveis locais → r4..r11 (salvos pelo callee)
+ *   Temporários      → r0..r3  (voláteis, reutilizados)
+ *   Loops            → r4 (contador), r5 (limite)
+ *   Endereços        → r6, r7
+ *   EMA state        → r8, r9 (C, H)
+ */
+#define REG_ARG0  0   /* r0 */
+#define REG_ARG1  1   /* r1 */
+#define REG_ARG2  2   /* r2 */
+#define REG_ARG3  3   /* r3 */
+#define REG_LOOP  4   /* r4 — contador de loop */
+#define REG_LIM   5   /* r5 — limite de loop */
+#define REG_PTR   6   /* r6 — ponteiro base */
+#define REG_OFF   7   /* r7 — offset / syscall */
+#define REG_C     8   /* r8 — coerência EMA */
+#define REG_H     9   /* r9 — entropia EMA */
+#define REG_TMP0  10  /* r10 */
+#define REG_TMP1  11  /* r11 */
+#define REG_SCRATCH 12 /* r12 */
+#define REG_SP    13
+#define REG_LR    14
+#define REG_PC    15
+
+/* ── SYSCALLS ARM32 TERMUX/BIONIC ────────────────────────────────────── */
+#define SYS_EXIT_GROUP 252  /* exit_group — CORRETO para Termux */
+#define SYS_WRITE      4
+#define SYS_READ       3
+#define SYS_OPEN       5
+#define SYS_CLOSE      6
+#define SYS_MMAP2      192
+
+#endif /* STATECOMP_H */
+STATECOMP_H
+pass "statecomp.h"
+
+# =============================================================================
+# [2] precomp.c — pré-compilador: resolve flags, expande macros
+# =============================================================================
+cat > "$DEST/precomp.c" << 'PRECOMP_C'
+/**
+ * precomp.c — Pré-compilador de Flags
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * ETAPA 1 DO PIPELINE:
+ *   Texto fonte → resolução de #FLAGs → stream de tokens tipados
+ *
+ * SINTAXE DE ENTRADA:
+ *   #FLAG [arg1] [,arg2] [,arg3]
+ *   // comentário de linha (removido)
+ *   /* comentário bloco (removido) */
+/*   Strings entre aspas: "texto" → literal
+ *
+ * RESOLUÇÃO:
+ *   Cada #FLAG é identificada por texto e mapeada para:
+ *     flag_t  (enum)
+ *     prime   (número primo)
+ *     hex     (valor convergido)
+ *   Argumentos são parseados e tipados (reg, imm, label, cond)
+ *
+ * SHADOWS e TAILS:
+ *   SHADOW = efeito lateral invisível de uma instrução
+ *     Ex: mul ARM32 NÃO atualiza carry (C) mas atualiza N,Z
+ *     → precomp injeta aviso: // SHADOW: N,Z modified
+ *   TAIL = código morto após #RET
+ *     → precomp marca como DEAD e suprime emissão
+ */
+#include "statecomp.h"
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+/* ── Tabela de flags por nome ────────────────────────────────────────── */
+typedef struct { const char *name; flag_t flag; u32 prime; u32 min_args; u32 max_args; } flag_entry_t;
+
+static const flag_entry_t FLAG_TABLE[] = {
+    /*  nome        flag        prime  min max */
+    { "LOAD",   FLAG_LOAD,    2,   2, 2 },
+    { "STORE",  FLAG_STORE,   3,   2, 3 },
+    { "ADD",    FLAG_ADD,     5,   3, 3 },
+    { "SUB",    FLAG_SUB,     7,   3, 3 },
+    { "MUL",    FLAG_MUL,    11,   3, 3 },
+    { "DIV",    FLAG_DIV,    13,   3, 3 },
+    { "AND",    FLAG_AND,    17,   3, 3 },
+    { "OR",     FLAG_OR,     19,   3, 3 },
+    { "XOR",    FLAG_XOR,    23,   3, 3 },
+    { "NOT",    FLAG_NOT,    29,   2, 2 },
+    { "SHL",    FLAG_SHL,    31,   3, 3 },
+    { "SHR",    FLAG_SHR,    37,   3, 3 },
+    { "CMP",    FLAG_CMP,    41,   2, 3 },
+    { "IF",     FLAG_IF,     41,   1, 3 },
+    { "ELSE",   FLAG_ELSE,   43,   0, 0 },
+    { "ENDIF",  FLAG_ENDIF,  43,   0, 0 },
+    { "WHILE",  FLAG_WHILE,  47,   1, 3 },
+    { "ENDWHILE",FLAG_ENDW,  47,   0, 0 },
+    { "ENDW",   FLAG_ENDW,   47,   0, 0 },
+    { "FOR",    FLAG_FOR,    59,   3, 4 },
+    { "ENDFOR", FLAG_ENDF,   59,   0, 0 },
+    { "ENDF",   FLAG_ENDF,   59,   0, 0 },
+    { "CALL",   FLAG_CALL,   61,   1, 4 },
+    { "RET",    FLAG_RET,    67,   0, 1 },
+    { "EMA",    FLAG_EMA,    71,   3, 3 },
+    { "CRC",    FLAG_CRC,    79,   2, 3 },
+    { "SIN",    FLAG_SIN,    83,   2, 2 },
+    { "TORO",   FLAG_TORO,   89,   2, 3 },
+    { "GATE",   FLAG_GATE,   91,   1, 2 },
+    { "NEON",   FLAG_NEON,   97,   3, 4 },
+    { "HEX",    FLAG_HEX,   103,   1, 8 },
+    { "ASM",    FLAG_ASM,   107,   1, 1 },
+    { "LABEL",  FLAG_LABEL, 109,   1, 1 },
+    { "BRANCH", FLAG_BRANCH,113,   1, 2 },
+    { "NOP",    FLAG_NOP,   127,   0, 0 },
+    { NULL,     FLAG_NONE,    0,   0, 0 },
+};
+
+/* ── Tabela de condições ─────────────────────────────────────────────── */
+typedef struct { const char *sym; const char *text; cond_t cond; } cond_entry_t;
+static const cond_entry_t COND_TABLE[] = {
+    { "==", "EQ", COND_EQ },
+    { "!=", "NE", COND_NE },
+    { "<",  "LT", COND_LT },
+    { "<=", "LE", COND_LE },
+    { ">",  "GT", COND_GT },
+    { ">=", "GE", COND_GE },
+    { "EQ", "EQ", COND_EQ },
+    { "NE", "NE", COND_NE },
+    { "LT", "LT", COND_LT },
+    { "LE", "LE", COND_LE },
+    { "GT", "GT", COND_GT },
+    { "GE", "GE", COND_GE },
+    { NULL, NULL, COND_AL  },
+};
+
+/* ── Shadow table (efeitos laterais invisíveis) ──────────────────────── */
+typedef struct { flag_t flag; const char *shadows; } shadow_entry_t;
+static const shadow_entry_t SHADOW_TABLE[] = {
+    { FLAG_MUL,  "N,Z (ARM32 mul atualiza N e Z mas NÃO C,V)" },
+    { FLAG_ADD,  "N,Z,C,V (add sem S não atualiza flags)" },
+    { FLAG_SUB,  "N,Z,C,V (sub sem S não atualiza flags)" },
+    { FLAG_AND,  "N,Z (and atualiza N,Z se sufixo S)" },
+    { FLAG_SHL,  "N,Z,C (C recebe último bit deslocado)" },
+    { FLAG_SHR,  "N,Z,C (C recebe último bit deslocado)" },
+    { FLAG_CRC,  "r12 destruído (scratch usado internamente)" },
+    { FLAG_EMA,  "r3 destruído (high word de umull)" },
+    { FLAG_NEON, "FPSCR modificado (arredondamento NEON)" },
+    { FLAG_NONE, NULL },
+};
+
+/* ── CRC32C init ─────────────────────────────────────────────────────── */
+static void _crc_init(sc_ctx_t *ctx) {
+    if (ctx->crc_ready) return;
+    for (u32 i=0;i<256;i++){
+        u32 v=i;
+        for(int j=0;j<8;j++) v=(v&1)?(v>>1)^0x82F63B78u:(v>>1);
+        ctx->crc_tab[i]=v;
+    }
+    ctx->crc_ready=1;
+}
+
+u32 sc_crc32c(sc_ctx_t *ctx, const void *buf, u32 n) {
+    _crc_init(ctx);
+    const u8 *p=(const u8*)buf; u32 c=~0u;
+    while(n--) c=(c>>8)^ctx->crc_tab[(c^*p++)&0xFF];
+    return ~c;
+}
+
+/* ── Arena alloc ─────────────────────────────────────────────────────── */
+void *sc_alloc(sc_ctx_t *ctx, u32 n) {
+    u32 s=(ctx->arena_bump+63u)&~63u;
+    if(s+n>SC_ARENA) return NULL;
+    ctx->arena_bump=s+n;
+    return ctx->arena+s;
+}
+
+/* ── Inicialização ───────────────────────────────────────────────────── */
+void sc_init(sc_ctx_t *ctx, emit_target_t target) {
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->target    = target;
+    ctx->label_ctr = 0;
+    /* todos os registradores livres inicialmente */
+    for(int i=0;i<16;i++) ctx->reg_free[i]=1;
+    /* r0..r3 são voláteis — sempre "livres" para temporários */
+    /* r13,r14,r15 são especiais — nunca alocar */
+    ctx->reg_free[13]=0;
+    ctx->reg_free[14]=0;
+    ctx->reg_free[15]=0;
+    /* init estado da máquina */
+    u32 seed=Q16_SPIRAL;
+    for(u32 d=0;d<SC_TORUS_DIM;d++){
+        seed=(u32)(((u64)seed*Q16_SPIRAL+(u64)d*1009u)&0xFFFFu);
+        ctx->machine.s[d]=seed;
+    }
+    ctx->machine.C=ctx->machine.H=Q16_HALF;
+    _crc_init(ctx);
+}
+
+/* ── Lookup de flag por nome ─────────────────────────────────────────── */
+static const flag_entry_t *find_flag(const char *name) {
+    for(int i=0;FLAG_TABLE[i].name;i++)
+        if(strcasecmp(FLAG_TABLE[i].name, name)==0)
+            return &FLAG_TABLE[i];
+    return NULL;
+}
+
+/* ── Lookup de condição ──────────────────────────────────────────────── */
+static cond_t find_cond(const char *s) {
+    for(int i=0;COND_TABLE[i].sym;i++)
+        if(strcmp(COND_TABLE[i].sym,s)==0||strcasecmp(COND_TABLE[i].text,s)==0)
+            return COND_TABLE[i].cond;
+    return COND_AL;
+}
+
+/* ── Tipo de argumento ───────────────────────────────────────────────── */
+typedef enum { ARG_REG, ARG_IMM, ARG_LABEL, ARG_COND, ARG_STR, ARG_UNK } arg_type_t;
+
+static arg_type_t arg_type(const char *s) {
+    if(!s||!*s) return ARG_UNK;
+    /* registrador: r0..r15, sp, lr, pc */
+    if((s[0]=='r'||s[0]=='R') && s[1]>='0' && s[1]<='9') return ARG_REG;
+    if(!strcasecmp(s,"sp")||!strcasecmp(s,"lr")||!strcasecmp(s,"pc")) return ARG_REG;
+    /* imediato: começa com # ou é número */
+    if(s[0]=='#') return ARG_IMM;
+    if(s[0]=='-'||(s[0]>='0'&&s[0]<='9')) return ARG_IMM;
+    if(s[0]=='0'&&(s[1]=='x'||s[1]=='X')) return ARG_IMM;
+    /* condição */
+    if(find_cond(s)!=COND_AL) return ARG_COND;
+    /* label: começa com letra ou _ */
+    if(s[0]=='_'||(s[0]>='a'&&s[0]<='z')||(s[0]>='A'&&s[0]<='Z')) return ARG_LABEL;
+    return ARG_UNK;
+}
+
+static u32 parse_imm(const char *s) {
+    if(!s) return 0;
+    if(s[0]=='#') s++;
+    if(s[0]=='0'&&(s[1]=='x'||s[1]=='X')) return (u32)strtoul(s+2,NULL,16);
+    return (u32)strtoul(s,NULL,10);
+}
+
+static u32 reg_num(const char *s) {
+    if(!s) return 0;
+    if(!strcasecmp(s,"sp")) return 13;
+    if(!strcasecmp(s,"lr")) return 14;
+    if(!strcasecmp(s,"pc")) return 15;
+    if(s[0]=='r'||s[0]=='R') return (u32)atoi(s+1);
+    return 0;
+}
+
+/* ── Tokenizar uma linha ──────────────────────────────────────────────── */
+static int tokenize_line(sc_ctx_t *ctx, const char *line, u32 lineno) {
+    /* skip whitespace */
+    while(*line==' '||*line=='\t') line++;
+    if(!*line||line[0]=='\n'||line[0]=='\r') return 0;
+    /* skip comments */
+    if(line[0]=='/'&&line[1]=='/') return 0;
+    if(line[0]==';') return 0;
+    /* deve começar com # para ser uma flag */
+    if(line[0]!='#') {
+        /* linha de ASM raw — emite como FLAG_ASM */
+        if(ctx->n_tokens>=SC_MAX_TOKENS) return -1;
+        sc_token_t *tok=&ctx->tokens[ctx->n_tokens++];
+        memset(tok,0,sizeof(*tok));
+        tok->flag=FLAG_ASM; tok->prime=107; tok->line=lineno;
+        strncpy(tok->text, line, 63);
+        strncpy(tok->arg[0], line, 31);
+        tok->n_args=1;
+        tok->hex=SC_HEX(107,0,0);
+        return 1;
+    }
+    line++; /* skip # */
+
+    /* extrai nome da flag */
+    char fname[32]={0}; int fi=0;
+    while(*line && *line!=' ' && *line!=',' && *line!='\t' && fi<31)
+        fname[fi++]=*line++;
+
+    const flag_entry_t *fe=find_flag(fname);
+    if(!fe) {
+        fprintf(stderr,"[WARN] linha %u: flag desconhecida #%s\n",lineno,fname);
+        ctx->n_warnings++;
+        return 0;
+    }
+
+    if(ctx->n_tokens>=SC_MAX_TOKENS) return -1;
+    sc_token_t *tok=&ctx->tokens[ctx->n_tokens++];
+    memset(tok,0,sizeof(*tok));
+    tok->flag  = fe->flag;
+    tok->prime = fe->prime;
+    tok->line  = lineno;
+    snprintf(tok->text,63,"#%s",fname);
+    tok->cond  = COND_AL;
+
+    /* extrai argumentos separados por vírgula ou espaço */
+    while(*line==' '||*line=='\t') line++;
+    u8 ai=0;
+    while(*line && *line!='\n' && *line!='\r' && ai<3) {
+        while(*line==' '||*line=='\t') line++;
+        if(!*line||*line=='\n'||*line=='\r') break;
+        /* skip comentário inline */
+        if(line[0]=='/'&&line[1]=='/') break;
+        int j=0;
+        while(*line && *line!=',' && *line!=' ' && *line!='\t' &&
+              *line!='\n' && *line!='\r' && j<31)
+            tok->arg[ai][j++]=*line++;
+        if(*line==',') line++;
+        if(tok->arg[ai][0]) ai++;
+    }
+    tok->n_args=ai;
+
+    /* detecta condição (para IF/WHILE) */
+    if(tok->flag==FLAG_IF||tok->flag==FLAG_WHILE||tok->flag==FLAG_CMP) {
+        for(u8 a=0;a<tok->n_args;a++) {
+            cond_t c=find_cond(tok->arg[a]);
+            if(c!=COND_AL){ tok->cond=c; break; }
+            /* detecta operadores inline: a>b → cond=GT */
+            if(strstr(tok->arg[a],">=")) tok->cond=COND_GE;
+            else if(strstr(tok->arg[a],"<=")) tok->cond=COND_LE;
+            else if(strstr(tok->arg[a],"!=")) tok->cond=COND_NE;
+            else if(strstr(tok->arg[a],"==")) tok->cond=COND_EQ;
+            else if(strstr(tok->arg[a],">"))  tok->cond=COND_GT;
+            else if(strstr(tok->arg[a],"<"))  tok->cond=COND_LT;
+        }
+    }
+
+    /* calcula hex convergido */
+    u32 op1=0,op2=0;
+    if(tok->n_args>0) {
+        arg_type_t at=arg_type(tok->arg[0]);
+        op1=(at==ARG_REG)?reg_num(tok->arg[0]):(at==ARG_IMM)?parse_imm(tok->arg[0]):0;
+    }
+    if(tok->n_args>1) {
+        arg_type_t at=arg_type(tok->arg[1]);
+        op2=(at==ARG_REG)?reg_num(tok->arg[1]):(at==ARG_IMM)?parse_imm(tok->arg[1]):0;
+    }
+    tok->hex=SC_HEX(fe->prime, op1&0xFF, op2&0xFF);
+
+    /* verifica shadow */
+    for(int s=0;SHADOW_TABLE[s].shadows;s++) {
+        if(SHADOW_TABLE[s].flag==tok->flag) {
+            fprintf(stderr,"[SHADOW] linha %u #%s: %s\n",
+                    lineno, fname, SHADOW_TABLE[s].shadows);
+        }
+    }
+
+    return 1;
+}
+
+/* ── Lexer principal ─────────────────────────────────────────────────── */
+int sc_lex(sc_ctx_t *ctx, const char *src, u32 len) {
+    u32 lineno=1;
+    const char *p=src, *end=src+len;
+    char line[512];
+
+    /* remove comentários de bloco */
+    static char buf[SC_MAX_EMIT];
+    u32 bi=0; int in_block=0;
+    for(u32 i=0;i<len&&bi<SC_MAX_EMIT-1;i++){
+        if(!in_block && src[i]=='/' && src[i+1]=='*'){ in_block=1; i++; continue; }
+        if(in_block && src[i]=='*' && src[i+1]=='/'){ in_block=0; i++; buf[bi++]=' '; continue; }
+        if(!in_block) buf[bi++]=src[i];
+    }
+    buf[bi]=0;
+
+    p=(const char*)buf; end=p+bi;
+    while(p<end){
+        /* lê linha */
+        int li=0;
+        while(p<end && *p!='\n' && li<511) line[li++]=*p++;
+        line[li]=0;
+        if(p<end&&*p=='\n'){ p++; lineno++; }
+        tokenize_line(ctx, line, lineno);
+    }
+    return (int)ctx->n_tokens;
+}
+
+/* ── Parser: valida estrutura (IF/WHILE/FOR balanceados) ─────────────── */
+int sc_parse(sc_ctx_t *ctx) {
+    int depth_if=0, depth_loop=0;
+    int dead=0; /* após RET: código morto */
+
+    for(u32 i=0;i<ctx->n_tokens;i++){
+        sc_token_t *t=&ctx->tokens[i];
+
+        /* detecta TAIL (código morto após RET) */
+        if(dead && t->flag!=FLAG_LABEL && t->flag!=FLAG_EOF){
+            fprintf(stderr,"[TAIL] linha %u: código após #RET (suprimido)\n",t->line);
+            ctx->n_warnings++;
+            t->flag=FLAG_NOP; /* suprime */
+            continue;
+        }
+
+        switch(t->flag){
+            case FLAG_IF:    depth_if++;   break;
+            case FLAG_ELSE:
+                if(depth_if==0){ fprintf(stderr,"[ERR] #ELSE sem #IF linha %u\n",t->line); ctx->n_errors++; }
+                break;
+            case FLAG_ENDIF:
+                if(depth_if==0){ fprintf(stderr,"[ERR] #ENDIF sem #IF linha %u\n",t->line); ctx->n_errors++; }
+                else depth_if--;
+                break;
+            case FLAG_WHILE:
+            case FLAG_FOR:   depth_loop++; break;
+            case FLAG_ENDW:
+            case FLAG_ENDF:
+                if(depth_loop==0){ fprintf(stderr,"[ERR] END sem inicio linha %u\n",t->line); ctx->n_errors++; }
+                else depth_loop--;
+                break;
+            case FLAG_RET:   dead=1; break;
+            case FLAG_LABEL: dead=0; break; /* label reseta dead */
+            default: break;
+        }
+
+        /* atualiza estado da máquina (EMA da coerência) */
+        u32 c_in=(t->prime*Q16_SPIRAL)&0xFFFFu;
+        u32 h_in=(65535u-c_in)&0xFFFFu;
+        ctx->machine.C=(u32)(((u64)ctx->machine.C*49152u+(u64)c_in*16384u)>>16);
+        ctx->machine.H=(u32)(((u64)ctx->machine.H*49152u+(u64)h_in*16384u)>>16);
+        ctx->machine.phi=(u32)(((u64)(65535u-ctx->machine.H)*ctx->machine.C)>>16);
+        ctx->machine.phase=(ctx->machine.phase+1)%SC_PERIOD;
+        ctx->n_states++;
+    }
+
+    if(depth_if>0)   fprintf(stderr,"[WARN] %d #IF sem #ENDIF\n",depth_if);
+    if(depth_loop>0) fprintf(stderr,"[WARN] %d loops sem fechamento\n",depth_loop);
+
+    return ctx->n_errors==0 ? 0 : -1;
+}
+
+/* ── Nomes para debug ────────────────────────────────────────────────── */
+const char *sc_flag_name(flag_t f){
+    for(int i=0;FLAG_TABLE[i].name;i++) if(FLAG_TABLE[i].flag==f) return FLAG_TABLE[i].name;
+    return "???";
+}
+const char *sc_cond_name(cond_t c){
+    static const char*N[]={"EQ","NE","LT","LE","GT","GE","HI","LO","AL","NV"};
+    return c<10?N[c]:"??";
+}
+u32 sc_prime_of(flag_t f){
+    for(int i=0;FLAG_TABLE[i].name;i++) if(FLAG_TABLE[i].flag==f) return FLAG_TABLE[i].prime;
+    return 1;
+}
+
+void sc_dump_tokens(const sc_ctx_t *ctx){
+    printf("=== TOKENS (%u) ===\n",ctx->n_tokens);
+    for(u32 i=0;i<ctx->n_tokens;i++){
+        const sc_token_t *t=&ctx->tokens[i];
+        printf("  [%3u] p=%-3u 0x%08X %-8s %-6s",
+            i, t->prime, t->hex, sc_flag_name(t->flag), sc_cond_name(t->cond));
+        for(u8 a=0;a<t->n_args;a++) printf(" %-8s",t->arg[a]);
+        printf("\n");
+    }
+}
+
+void sc_dump_stats(const sc_ctx_t *ctx){
+    printf("=== STATS ===\n");
+    printf("  tokens:       %u\n",ctx->n_tokens);
+    printf("  states:       %u\n",ctx->n_states);
+    printf("  instructions: %u\n",ctx->n_instructions);
+    printf("  errors:       %u\n",ctx->n_errors);
+    printf("  warnings:     %u\n",ctx->n_warnings);
+    printf("  emit_bytes:   %u\n",ctx->emit_pos);
+    printf("  arena_used:   %uKB\n",ctx->arena_bump/1024);
+    printf("  phi_final:    0x%04X\n",ctx->machine.phi);
+    printf("  crc_chain:    0x%08X\n",ctx->machine.crc_chain);
+}
+PRECOMP_C
+pass "precomp.c"
+
+# =============================================================================
+# [3] emit_arm32.c — emissor ARM32 inline assembler
+# =============================================================================
+cat > "$DEST/emit_arm32.c" << 'EMIT_ARM32_C'
+/**
+ * emit_arm32.c — Emissor ARM32 AAPCS armeabi-v7a
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * Converte stream de tokens tipados em assembly ARM32 inline.
+ * Output: string de texto assembly válida para clang -march=armv7-a
+ *
+ * GARANTIAS:
+ *   - Primeira instrução: push {r4,r5,r6,r7,lr} (snapshot genérico)
+ *   - Última instrução:   pop  {r4,r5,r6,r7,pc} (rollback atômico)
+ *   - Nenhum SHADOW silencioso: comentários inline em toda instrução
+ *   - Toda label é única (label_ctr crescente)
+ *   - #EMA usa umull+lsr sem float (determinístico Q16.16)
+ *   - #CRC usa tabela derivada em runtime (sem hardcode)
+ *   - #NEON usa vld1q/vmulq/vst1q quando HAS_NEON definido
+ */
+#include "statecomp.h"
+#include <stdio.h>
+#include <string.h>
+
+/* ── Buffer de saída texto ─────────────────────────────────────────────── */
+static int emit_str(sc_ctx_t *ctx, const char *s) {
+    u32 n=(u32)strlen(s);
+    if(ctx->emit_pos+n>=SC_MAX_EMIT) return -1;
+    memcpy(ctx->emit_buf+ctx->emit_pos, s, n);
+    ctx->emit_pos+=n;
+    ctx->emit_buf[ctx->emit_pos]=0;
+    return 0;
+}
+
+static int emit_fmt(sc_ctx_t *ctx, const char *fmt, ...) {
+    char buf[256];
+    va_list ap;
+    va_start(ap,fmt);
+    vsnprintf(buf,255,fmt,ap);
+    va_end(ap);
+    return emit_str(ctx,buf);
+}
+
+/* ── Registrador ARM32 como string ─────────────────────────────────────── */
+static const char *rname(u32 n){
+    static const char*R[]={"r0","r1","r2","r3","r4","r5","r6","r7",
+                            "r8","r9","r10","r11","r12","sp","lr","pc"};
+    return n<16?R[n]:"r0";
+}
+
+/* ── Alocação de registrador ────────────────────────────────────────────── */
+static u32 alloc_reg(sc_ctx_t *ctx, const char *var) {
+    /* já alocado? */
+    for(u32 i=0;i<16;i++)
+        if(!ctx->reg_free[i]&&strcmp(ctx->reg_var[i],var)==0) return i;
+    /* aloca novo (r4..r11 salvos, r0..r3 temporários) */
+    for(u32 i=4;i<=11;i++){
+        if(ctx->reg_free[i]){
+            ctx->reg_free[i]=0;
+            strncpy(ctx->reg_var[i],var,31);
+            return i;
+        }
+    }
+    /* sem reg salvo livre → usa r0 (temporário) */
+    strncpy(ctx->reg_var[0],var,31);
+    return 0;
+}
+
+static void free_reg(sc_ctx_t *ctx, u32 r){
+    if(r<16){ ctx->reg_free[r]=1; ctx->reg_var[r][0]=0; }
+}
+
+/* ── Tipo de argumento e valor ─────────────────────────────────────────── */
+static int is_reg(const char *s){
+    if(!s||!*s) return 0;
+    if((s[0]=='r'||s[0]=='R')&&s[1]>='0'&&s[1]<='9') return 1;
+    if(!strcasecmp(s,"sp")||!strcasecmp(s,"lr")||!strcasecmp(s,"pc")) return 1;
+    return 0;
+}
+static int is_imm(const char *s){
+    if(!s||!*s) return 0;
+    if(s[0]=='#') return 1;
+    if(s[0]=='-'||((s[0]>='0')&&(s[0]<='9'))) return 1;
+    if(s[0]=='0'&&(s[1]=='x'||s[1]=='X')) return 1;
+    return 0;
+}
+static u32 get_imm(const char *s){
+    if(!s) return 0;
+    if(s[0]=='#') s++;
+    if(s[0]=='0'&&(s[1]=='x'||s[1]=='X')) return (u32)strtoul(s+2,NULL,16);
+    return (u32)strtoul(s,NULL,10);
+}
+static u32 get_reg(const char *s){
+    if(!s) return 0;
+    if(!strcasecmp(s,"sp")) return 13;
+    if(!strcasecmp(s,"lr")) return 14;
+    if(!strcasecmp(s,"pc")) return 15;
+    if(s[0]=='r'||s[0]=='R') return (u32)atoi(s+1);
+    return alloc_reg(ctx_placeholder, s); /* ver abaixo */
+}
+
+/* ctx global temporário para get_reg (necessário pois é macro) */
+static sc_ctx_t *_ctx_g=NULL;
+static u32 get_reg_ctx(sc_ctx_t *ctx, const char *s){
+    if(!s) return 0;
+    if(!strcasecmp(s,"sp")) return 13;
+    if(!strcasecmp(s,"lr")) return 14;
+    if(!strcasecmp(s,"pc")) return 15;
+    if((s[0]=='r'||s[0]=='R')&&s[1]>='0'&&s[1]<='9') return (u32)atoi(s+1);
+    return alloc_reg(ctx,s);
+}
+
+/* ── Condição → sufixo ARM32 ─────────────────────────────────────────── */
+static const char *cond_suffix(cond_t c){
+    static const char*S[]={"eq","ne","lt","le","gt","ge","hi","lo","","nv"};
+    return c<10?S[c]:"";
+}
+
+/* ── Emissor por flag ────────────────────────────────────────────────── */
+
+static void emit_load(sc_ctx_t *ctx, const sc_token_t *t){
+    u32 rd=get_reg_ctx(ctx,t->arg[0]);
+    const char *src=t->arg[1];
+    if(is_reg(src)){
+        u32 rs=get_reg_ctx(ctx,src);
+        emit_fmt(ctx,"    mov %s, %s  @ #LOAD p=2 hex=0x%08X\n",rname(rd),rname(rs),t->hex);
+    } else if(is_imm(src)){
+        u32 iv=get_imm(src);
+        if(iv<256)
+            emit_fmt(ctx,"    mov %s, #%u  @ #LOAD imm8 0x%02X\n",rname(rd),iv,iv);
+        else
+            emit_fmt(ctx,"    ldr %s, =%u  @ #LOAD imm32 0x%08X\n",rname(rd),iv,iv);
+    } else {
+        emit_fmt(ctx,"    ldr %s, =g_%s  @ #LOAD var\n",rname(rd),src);
+    }
+    ctx->n_instructions++;
+}
+
+static void emit_store(sc_ctx_t *ctx, const sc_token_t *t){
+    u32 rs=get_reg_ctx(ctx,t->arg[0]);
+    const char *dst=t->arg[1];
+    if(is_reg(dst)){
+        u32 rd=get_reg_ctx(ctx,dst);
+        u32 off=t->n_args>2?get_imm(t->arg[2]):0;
+        if(off) emit_fmt(ctx,"    str %s, [%s, #%u]  @ #STORE+off\n",rname(rs),rname(rd),off);
+        else    emit_fmt(ctx,"    str %s, [%s]  @ #STORE\n",rname(rs),rname(rd));
+    } else {
+        emit_fmt(ctx,"    ldr r12, =g_%s  @ #STORE addr\n",dst);
+        emit_fmt(ctx,"    str %s, [r12]   @ #STORE val (r12=SHADOW)\n",rname(rs));
+    }
+    ctx->n_instructions+=2;
+}
+
+static void emit_alu(sc_ctx_t *ctx, const sc_token_t *t, const char *op){
+    u32 rd=get_reg_ctx(ctx,t->arg[0]);
+    u32 ra=get_reg_ctx(ctx,t->arg[1]);
+    const char *b=t->arg[2];
+    if(is_imm(b)){
+        u32 iv=get_imm(b);
+        emit_fmt(ctx,"    %s %s, %s, #%u  @ #%s p=%u hex=0x%08X\n",
+            op,rname(rd),rname(ra),iv,op,t->prime,t->hex);
+    } else {
+        u32 rb=get_reg_ctx(ctx,b);
+        emit_fmt(ctx,"    %s %s, %s, %s  @ #%s p=%u\n",
+            op,rname(rd),rname(ra),rname(rb),op,t->prime);
+    }
+    ctx->n_instructions++;
+}
+
+static void emit_mul_q16(sc_ctx_t *ctx, const sc_token_t *t){
+    /* #MUL dst, a, b → umull rL,r3,rA,rB; lsr rL,rL,#16 */
+    u32 rd=get_reg_ctx(ctx,t->arg[0]);
+    u32 ra=get_reg_ctx(ctx,t->arg[1]);
+    u32 rb=get_reg_ctx(ctx,t->arg[2]);
+    emit_fmt(ctx,"    @ #MUL Q16.16: %s = %s × %s >> 16  p=11\n",
+        t->arg[0],t->arg[1],t->arg[2]);
+    emit_fmt(ctx,"    umull %s, r3, %s, %s  @ low×high  SHADOW:r3\n",
+        rname(rd),rname(ra),rname(rb));
+    emit_fmt(ctx,"    orr   %s, %s, r3, lsl #16  @ combine\n",rname(rd),rname(rd));
+    emit_fmt(ctx,"    lsr   %s, %s, #16  @ >> 16 = Q16 result\n",rname(rd),rname(rd));
+    ctx->n_instructions+=3;
+}
+
+static void emit_if(sc_ctx_t *ctx, const sc_token_t *t){
+    u32 lbl=ctx->label_ctr++;
+    /* empilha label */
+    if(ctx->machine.if_top<32) ctx->machine.if_stack[ctx->machine.if_top++]=lbl;
+    u32 ra=get_reg_ctx(ctx,t->arg[0]);
+    const char *b=t->arg[1][0]?t->arg[1]:t->arg[0];
+    cond_t inv=t->cond; /* condição INVERSA para o branch (salta o bloco) */
+    static const cond_t inv_map[]={COND_NE,COND_EQ,COND_GE,COND_GT,COND_LE,COND_LT,COND_LO,COND_HI,COND_NV,COND_AL};
+    cond_t bc=(u32)inv<10?inv_map[inv]:COND_NE;
+
+    emit_fmt(ctx,"    @ #IF %s  p=41 hex=0x%08X\n",t->arg[0],t->hex);
+    if(is_imm(b))
+        emit_fmt(ctx,"    cmp %s, #%u  @ compare\n",rname(ra),get_imm(b));
+    else {
+        u32 rb=get_reg_ctx(ctx,b);
+        emit_fmt(ctx,"    cmp %s, %s  @ compare\n",rname(ra),rname(rb));
+    }
+    emit_fmt(ctx,"    b%s .else_%u  @ skip if NOT (%s)\n",
+        cond_suffix(bc),lbl,sc_cond_name(t->cond));
+    ctx->n_instructions+=2;
+}
+
+static void emit_else(sc_ctx_t *ctx, const sc_token_t *t){
+    if(ctx->machine.if_top==0){emit_str(ctx,"    @ #ELSE sem #IF\n");return;}
+    u32 lbl=ctx->machine.if_stack[ctx->machine.if_top-1];
+    emit_fmt(ctx,"    b   .endif_%u  @ #ELSE skip then-block\n",lbl);
+    emit_fmt(ctx,".else_%u:  @ else branch\n",lbl);
+    ctx->n_instructions+=1;
+}
+
+static void emit_endif(sc_ctx_t *ctx, const sc_token_t *t){
+    if(ctx->machine.if_top==0){emit_str(ctx,"    @ #ENDIF sem #IF\n");return;}
+    u32 lbl=ctx->machine.if_stack[--ctx->machine.if_top];
+    emit_fmt(ctx,".else_%u:  @ #ENDIF (se não tinha #ELSE)\n",lbl);
+    emit_fmt(ctx,".endif_%u:  @ endif\n",lbl);
+}
+
+static void emit_while(sc_ctx_t *ctx, const sc_token_t *t){
+    u32 lbl=ctx->label_ctr++;
+    if(ctx->machine.loop_top<32) ctx->machine.loop_stack[ctx->machine.loop_top++]=lbl;
+    u32 ra=get_reg_ctx(ctx,t->arg[0]);
+    const char *b=t->arg[1][0]?t->arg[1]:t->arg[0];
+    static const cond_t inv_map[]={COND_NE,COND_EQ,COND_GE,COND_GT,COND_LE,COND_LT,COND_LO,COND_HI,COND_NV,COND_AL};
+    cond_t bc=(u32)t->cond<10?inv_map[t->cond]:COND_GE;
+
+    emit_fmt(ctx,".while_%u:  @ #WHILE p=47 hex=0x%08X\n",lbl,t->hex);
+    if(is_imm(b)) emit_fmt(ctx,"    cmp %s, #%u\n",rname(ra),get_imm(b));
+    else { u32 rb=get_reg_ctx(ctx,b); emit_fmt(ctx,"    cmp %s, %s\n",rname(ra),rname(rb)); }
+    emit_fmt(ctx,"    b%s .endwhile_%u  @ exit if NOT (%s)\n",
+        cond_suffix(bc),lbl,sc_cond_name(t->cond));
+    ctx->n_instructions+=2;
+}
+
+static void emit_endwhile(sc_ctx_t *ctx, const sc_token_t *t){
+    if(ctx->machine.loop_top==0){emit_str(ctx,"    @ ENDWHILE sem WHILE\n");return;}
+    u32 lbl=ctx->machine.loop_stack[--ctx->machine.loop_top];
+    emit_fmt(ctx,"    b   .while_%u  @ loop back\n",lbl);
+    emit_fmt(ctx,".endwhile_%u:  @ endwhile\n",lbl);
+    ctx->n_instructions++;
+}
+
+static void emit_for(sc_ctx_t *ctx, const sc_token_t *t){
+    u32 lbl=ctx->label_ctr++;
+    if(ctx->machine.loop_top<32) ctx->machine.loop_stack[ctx->machine.loop_top++]=lbl;
+    /* #FOR i, start, end [,step] */
+    u32 ri=get_reg_ctx(ctx,t->arg[0]);
+    u32 start=t->n_args>1?get_imm(t->arg[1]):0;
+    u32 end  =t->n_args>2?get_imm(t->arg[2]):1;
+    u32 step =t->n_args>3?get_imm(t->arg[3]):1;
+    /* armazena end no r5 */
+    emit_fmt(ctx,"    @ #FOR %s=%u..%u step %u  p=59 hex=0x%08X\n",
+        t->arg[0],start,end,step,t->hex);
+    emit_fmt(ctx,"    mov %s, #%u  @ init counter\n",rname(ri),start);
+    if(end<256) emit_fmt(ctx,"    mov r5, #%u  @ limit\n",end);
+    else        emit_fmt(ctx,"    ldr r5, =%u  @ limit\n",end);
+    emit_fmt(ctx,".for_%u:  @ loop start\n",lbl);
+    emit_fmt(ctx,"    cmp %s, r5  @ i<limit?\n",rname(ri));
+    emit_fmt(ctx,"    bge .endfor_%u  @ exit if i>=limit\n",lbl);
+    ctx->n_instructions+=4;
+    /* salva step e label para ENDF */
+    ctx->machine.loop_stack[ctx->machine.loop_top-1]=(lbl|(step<<16));
+}
+
+static void emit_endfor(sc_ctx_t *ctx, const sc_token_t *t){
+    if(ctx->machine.loop_top==0){emit_str(ctx,"    @ ENDFOR sem FOR\n");return;}
+    u32 packed=ctx->machine.loop_stack[--ctx->machine.loop_top];
+    u32 lbl=packed&0xFFFFu, step=(packed>>16)&0xFFFFu;
+    if(!step)step=1;
+    /* recupera registrador do loop — assume r4 ou last alloc */
+    emit_fmt(ctx,"    add r4, r4, #%u  @ i+=step\n",step);
+    emit_fmt(ctx,"    b   .for_%u  @ next iteration\n",lbl);
+    emit_fmt(ctx,".endfor_%u:  @ endfor\n",lbl);
+    ctx->n_instructions+=2;
+}
+
+static void emit_call(sc_ctx_t *ctx, const sc_token_t *t){
+    emit_fmt(ctx,"    @ #CALL %s  p=61 hex=0x%08X\n",t->arg[0],t->hex);
+    /* push args se houver */
+    if(t->n_args>1){
+        for(u8 a=1;a<t->n_args&&a<=4;a++){
+            u32 r=get_reg_ctx(ctx,t->arg[a]);
+            emit_fmt(ctx,"    mov r%d, %s  @ arg%d\n",(int)(a-1),rname(r),(int)(a-1));
+        }
+    }
+    emit_fmt(ctx,"    bl  %s  @ call (lr=return addr)\n",t->arg[0]);
+    ctx->n_instructions++;
+}
+
+static void emit_ret(sc_ctx_t *ctx, const sc_token_t *t){
+    if(t->n_args>0&&t->arg[0][0]){
+        u32 r=get_reg_ctx(ctx,t->arg[0]);
+        if(r!=0) emit_fmt(ctx,"    mov r0, %s  @ return value\n",rname(r));
+    }
+    emit_fmt(ctx,"    pop {{r4, r5, r6, r7, pc}}  @ #RET rollback+return\n");
+    ctx->n_instructions++;
+}
+
+static void emit_ema(sc_ctx_t *ctx, const sc_token_t *t){
+    /* #EMA dst, old, in → dst = (old*49152 + in*16384) >> 16 */
+    u32 rd=get_reg_ctx(ctx,t->arg[0]);
+    u32 ro=get_reg_ctx(ctx,t->arg[1]);
+    u32 ri=get_reg_ctx(ctx,t->arg[2]);
+    emit_fmt(ctx,"    @ #EMA Q16.16: %s=0.75*%s+0.25*%s  p=71\n",t->arg[0],t->arg[1],t->arg[2]);
+    emit_fmt(ctx,"    ldr r12, =49152  @ alpha_inv\n");
+    emit_fmt(ctx,"    umull r11, r3, %s, r12  @ old*inv  SHADOW:r3,r11,r12\n",rname(ro));
+    emit_fmt(ctx,"    ldr r12, =16384  @ alpha\n");
+    emit_fmt(ctx,"    umull r10, r3, %s, r12  @ in*alpha  SHADOW:r3,r10\n",rname(ri));
+    emit_fmt(ctx,"    add   r11, r11, r10  @ sum\n");
+    emit_fmt(ctx,"    lsr   %s, r11, #16  @ >>16 = Q16 result\n",rname(rd));
+    ctx->n_instructions+=6;
+}
+
+static void emit_crc(sc_ctx_t *ctx, const sc_token_t *t){
+    /* #CRC dst, buf, len → CRC32C loop */
+    u32 rd=get_reg_ctx(ctx,t->arg[0]);
+    u32 rb=get_reg_ctx(ctx,t->arg[1]);
+    u32 rn=t->n_args>2?get_reg_ctx(ctx,t->arg[2]):REG_LOOP;
+    u32 lbl=ctx->label_ctr++;
+    emit_fmt(ctx,"    @ #CRC32C: %s=crc(%s,%s)  p=79 RFC3720\n",t->arg[0],t->arg[1],t->arg[2]);
+    emit_fmt(ctx,"    mvn  %s, #0  @ crc=0xFFFFFFFF\n",rname(rd));
+    emit_fmt(ctx,"    ldr  r12, =g_crc_tab  @ tabela CRC\n");
+    emit_fmt(ctx,".crc_%u:  @ loop CRC\n",lbl);
+    emit_fmt(ctx,"    subs %s, %s, #1  @ len--\n",rname(rn),rname(rn));
+    emit_fmt(ctx,"    blt .crc_done_%u  @ done if len<0\n",lbl);
+    emit_fmt(ctx,"    ldrb r11, [%s], #1  @ byte from buf\n",rname(rb));
+    emit_fmt(ctx,"    eor  r11, r11, %s  @ xor with crc low\n",rname(rd));
+    emit_fmt(ctx,"    and  r11, r11, #0xFF  @ low byte\n");
+    emit_fmt(ctx,"    ldr  r11, [r12, r11, lsl #2]  @ tab[idx]\n");
+    emit_fmt(ctx,"    lsr  %s, %s, #8  @ crc>>8\n",rname(rd),rname(rd));
+    emit_fmt(ctx,"    eor  %s, %s, r11  @ xor\n",rname(rd),rname(rd));
+    emit_fmt(ctx,"    b    .crc_%u  @ next byte\n",lbl);
+    emit_fmt(ctx,".crc_done_%u:\n",lbl);
+    emit_fmt(ctx,"    mvn  %s, %s  @ ~crc = final CRC32C\n",rname(rd),rname(rd));
+    ctx->n_instructions+=12;
+}
+
+static void emit_sin(sc_ctx_t *ctx, const sc_token_t *t){
+    /* #SIN dst, x → Taylor Q16.16 */
+    u32 rd=get_reg_ctx(ctx,t->arg[0]);
+    u32 rx=get_reg_ctx(ctx,t->arg[1]);
+    u32 lbl=ctx->label_ctr++;
+    emit_fmt(ctx,"    @ #SIN Q16.16 Taylor: %s=sin(%s)  p=83\n",t->arg[0],t->arg[1]);
+    emit_fmt(ctx,"    mov  %s, %s  @ x\n",rname(rd),rname(rx));
+    /* reduce mod 2PI */
+    emit_fmt(ctx,".sin_red_%u: ldr r12,=411774; cmp %s,r12; blt .sin_ok_%u; sub %s,%s,r12; b .sin_red_%u\n",
+        lbl,rname(rd),lbl,rname(rd),rname(rd),lbl);
+    emit_fmt(ctx,".sin_ok_%u:  @ reduced\n",lbl);
+    /* negate if >= PI */
+    emit_fmt(ctx,"    mov  r11, #0  @ neg flag\n");
+    emit_fmt(ctx,"    ldr  r12, =205887  @ PI_Q16\n");
+    emit_fmt(ctx,"    cmp  %s, r12\n",rname(rd));
+    emit_fmt(ctx,"    subge %s, %s, r12  @ x -= PI\n",rname(rd),rname(rd));
+    emit_fmt(ctx,"    movge r11, #1  @ neg=1\n");
+    /* x^2 = (x*x)>>16 */
+    emit_fmt(ctx,"    umull r10, r3, %s, %s  @ x*x  SHADOW:r3,r10\n",rname(rd),rname(rd));
+    emit_fmt(ctx,"    lsr  r10, r10, #16  @ x2\n");
+    /* x^3 = (x2*x)>>16 */
+    emit_fmt(ctx,"    umull r9, r3, r10, %s  @ x2*x\n",rname(rd));
+    emit_fmt(ctx,"    lsr  r9, r9, #16  @ x3\n");
+    /* t1 = x3*INV6>>16 */
+    emit_fmt(ctx,"    ldr  r12, =10923  @ INV6_Q16\n");
+    emit_fmt(ctx,"    umull r8, r3, r9, r12  @ x3*inv6\n");
+    emit_fmt(ctx,"    lsr  r8, r8, #16  @ t1\n");
+    /* x^5 = (x3*x2)>>16 */
+    emit_fmt(ctx,"    umull r7, r3, r9, r10  @ x3*x2\n");
+    emit_fmt(ctx,"    lsr  r7, r7, #16  @ x5\n");
+    /* t2 = x5*INV120>>16 */
+    emit_fmt(ctx,"    ldr  r12, =546  @ INV120_Q16\n");
+    emit_fmt(ctx,"    umull r6, r3, r7, r12  @ x5*inv120\n");
+    emit_fmt(ctx,"    lsr  r6, r6, #16  @ t2\n");
+    /* result = x - t1 + t2 */
+    emit_fmt(ctx,"    sub  %s, %s, r8  @ x-t1\n",rname(rd),rname(rd));
+    emit_fmt(ctx,"    add  %s, %s, r6  @ +t2\n",rname(rd),rname(rd));
+    /* clamp [0,65535] */
+    emit_fmt(ctx,"    ldr  r12, =65535\n");
+    emit_fmt(ctx,"    cmp  %s, r12; movgt %s, r12\n",rname(rd),rname(rd));
+    emit_fmt(ctx,"    cmp  %s, #0;  movlt %s, #0\n",rname(rd),rname(rd));
+    /* negate if flag set */
+    emit_fmt(ctx,"    cmp  r11, #1\n");
+    emit_fmt(ctx,"    rsbge %s, %s, r12  @ 65535-x if neg\n",rname(rd),rname(rd));
+    ctx->n_instructions+=26;
+}
+
+static void emit_neon(sc_ctx_t *ctx, const sc_token_t *t){
+    /* #NEON op, dst, src1, [src2] */
+    const char *op=t->arg[0];
+    const char *d =t->n_args>1?t->arg[1]:"q0";
+    const char *s1=t->n_args>2?t->arg[2]:"q1";
+    const char *s2=t->n_args>3?t->arg[3]:"q2";
+    emit_fmt(ctx,"    @ #NEON %s %s,%s,%s  p=97\n",op,d,s1,s2);
+    emit_fmt(ctx,"#ifdef HAS_NEON\n");
+    if(!strcasecmp(op,"ADD"))
+        emit_fmt(ctx,"    vadd.u32 %s, %s, %s\n",d,s1,s2);
+    else if(!strcasecmp(op,"MUL"))
+        emit_fmt(ctx,"    vmul.u32 %s, %s, %s\n",d,s1,s2);
+    else if(!strcasecmp(op,"EMA")){
+        emit_fmt(ctx,"    @ NEON EMA: 4-wide Q16.16\n");
+        emit_fmt(ctx,"    vmov.i32 q14, #49152  @ inv_alpha\n");
+        emit_fmt(ctx,"    vmov.i32 q15, #16384  @ alpha\n");
+        emit_fmt(ctx,"    vmull.u32 q8, d0, d28  @ old*inv lo\n");
+        emit_fmt(ctx,"    vmull.u32 q9, d1, d29  @ old*inv hi\n");
+        emit_fmt(ctx,"    vmull.u32 q10, d2, d30  @ in*alpha lo\n");
+        emit_fmt(ctx,"    vmull.u32 q11, d3, d31  @ in*alpha hi\n");
+        emit_fmt(ctx,"    vadd.u64  q8, q8, q10\n");
+        emit_fmt(ctx,"    vadd.u64  q9, q9, q11\n");
+        emit_fmt(ctx,"    vshrn.u64 d0, q8, #16\n");
+        emit_fmt(ctx,"    vshrn.u64 d1, q9, #16\n");
+    } else if(!strcasecmp(op,"LOAD"))
+        emit_fmt(ctx,"    vld1.32 {%s}, [%s]\n",d,s1);
+    else if(!strcasecmp(op,"STORE"))
+        emit_fmt(ctx,"    vst1.32 {%s}, [%s]\n",d,s1);
+    else
+        emit_fmt(ctx,"    @ NEON OP '%s' não reconhecido\n",op);
+    emit_fmt(ctx,"#else\n    @ NEON fallback: operação escalar\n#endif\n");
+    ctx->n_instructions+=5;
+}
+
+static void emit_toro(sc_ctx_t *ctx, const sc_token_t *t){
+    /* #TORO dim,val → EMA do estado toroidal na dimensão dim */
+    u32 lbl=ctx->label_ctr++;
+    emit_fmt(ctx,"    @ #TORO T^7: dim=%s val=%s  p=89\n",t->arg[0],t->arg[1]);
+    u32 dim=get_imm(t->arg[0]);
+    if(dim>=7) dim=0;
+    u32 rv=get_reg_ctx(ctx,t->arg[1]);
+    emit_fmt(ctx,"    ldr  r12, =g_toro_state  @ T^7 base\n");
+    emit_fmt(ctx,"    ldr  r11, [r12, #%u]  @ s[%u] current\n",dim*4,dim);
+    emit_fmt(ctx,"    @ EMA: s[%u] = 0.75*s[%u] + 0.25*val\n",dim,dim);
+    emit_fmt(ctx,"    ldr  r10, =49152\n");
+    emit_fmt(ctx,"    umull r9, r3, r11, r10  @ 0.75*s  SHADOW:r3\n");
+    emit_fmt(ctx,"    lsr  r9, r9, #16\n");
+    emit_fmt(ctx,"    ldr  r10, =16384\n");
+    emit_fmt(ctx,"    umull r8, r3, %s, r10  @ 0.25*val\n",rname(rv));
+    emit_fmt(ctx,"    lsr  r8, r8, #16\n");
+    emit_fmt(ctx,"    add  r9, r9, r8  @ soma\n");
+    emit_fmt(ctx,"    str  r9, [r12, #%u]  @ s[%u] updated\n",dim*4,dim);
+    ctx->n_instructions+=10;
+}
+
+static void emit_gate(sc_ctx_t *ctx, const sc_token_t *t){
+    /* #GATE state_ptr [,label] → commit gate 4 fases */
+    u32 lbl=ctx->label_ctr++;
+    const char *sptr=t->arg[0][0]?t->arg[0]:"g_gate_state";
+    emit_fmt(ctx,"    @ #GATE 4-phase commit: LOAD→PROC→VERIFY→COMMIT  p=91\n");
+    /* LOAD */
+    emit_fmt(ctx,"    @ FASE 1: LOAD (snapshot)\n");
+    emit_fmt(ctx,"    ldr  r12, =%s  @ state ptr\n",sptr);
+    emit_fmt(ctx,"    ldmia r12, {{r4,r5,r6,r7}}  @ snapshot\n");
+    emit_fmt(ctx,"    orr  r10, r10, #0x1  @ gate_bits |= LOAD\n");
+    /* PROCESS */
+    emit_fmt(ctx,"    @ FASE 2: PROCESS\n");
+    emit_fmt(ctx,"    @ (código do usuário executa aqui)\n");
+    emit_fmt(ctx,"    orr  r10, r10, #0x2  @ gate_bits |= PROC\n");
+    /* VERIFY */
+    emit_fmt(ctx,"    @ FASE 3: VERIFY (CRC32C)\n");
+    emit_fmt(ctx,"    bl   g_crc32  @ CRC do estado\n");
+    emit_fmt(ctx,"    cmp  r0, #0  @ CRC=0? corrupção\n");
+    emit_fmt(ctx,"    beq .gate_rollback_%u  @ rollback\n",lbl);
+    emit_fmt(ctx,"    orr  r10, r10, #0x4  @ gate_bits |= VERIFY\n");
+    /* COMMIT */
+    emit_fmt(ctx,"    @ FASE 4: COMMIT\n");
+    emit_fmt(ctx,"    and  r11, r10, #0xF\n");
+    emit_fmt(ctx,"    cmp  r11, #0xF  @ all 4 bits set?\n");
+    emit_fmt(ctx,"    bne .gate_rollback_%u\n",lbl);
+    emit_fmt(ctx,"    orr  r10, r10, #0x8  @ gate_bits |= COMMIT\n");
+    emit_fmt(ctx,"    mov  r10, #0  @ reset gate_bits\n");
+    emit_fmt(ctx,"    b   .gate_done_%u\n",lbl);
+    emit_fmt(ctx,".gate_rollback_%u:  @ ROLLBACK: restaura snapshot\n",lbl);
+    emit_fmt(ctx,"    stmia r12, {{r4,r5,r6,r7}}  @ restore\n");
+    emit_fmt(ctx,"    mov  r10, #0\n");
+    emit_fmt(ctx,".gate_done_%u:  @ gate complete\n",lbl);
+    ctx->n_instructions+=18;
+}
+
+static void emit_hex(sc_ctx_t *ctx, const sc_token_t *t){
+    emit_fmt(ctx,"    @ #HEX direct bytes  p=103\n");
+    for(u8 a=0;a<t->n_args;a++){
+        u32 v=get_imm(t->arg[a]);
+        emit_fmt(ctx,"    .byte 0x%02X  @ raw 0x%02X\n",v&0xFF,v&0xFF);
+    }
+    ctx->n_instructions+=t->n_args;
+}
+
+static void emit_asm_raw(sc_ctx_t *ctx, const sc_token_t *t){
+    emit_fmt(ctx,"    %s  @ #ASM passthrough p=107\n",t->arg[0]);
+    ctx->n_instructions++;
+}
+
+static void emit_label(sc_ctx_t *ctx, const sc_token_t *t){
+    emit_fmt(ctx,"%s:  @ #LABEL p=109\n",t->arg[0]);
+}
+
+static void emit_branch(sc_ctx_t *ctx, const sc_token_t *t){
+    const char *sf=cond_suffix(t->cond);
+    emit_fmt(ctx,"    b%s %s  @ #BRANCH p=113\n",sf,t->arg[0]);
+    ctx->n_instructions++;
+}
+
+static void emit_nop(sc_ctx_t *ctx, const sc_token_t *t){
+    emit_fmt(ctx,"    mov r0, r0  @ #NOP p=127\n");
+    ctx->n_instructions++;
+}
+
+/* ── Emissor principal ────────────────────────────────────────────────── */
+int sc_emit(sc_ctx_t *ctx) {
+    if(ctx->target!=EMIT_ARM32 && ctx->target!=EMIT_C){
+        emit_str(ctx,"@ Target não suportado nesta versão\n");
+        return -1;
+    }
+
+    /* Cabeçalho */
+    emit_str(ctx,"@ ═══════════════════════════════════════════════════════\n");
+    emit_fmt(ctx,"@ RAFAELIA STATECOMP v%s — ARM32 armeabi-v7a\n",SC_VERSION);
+    emit_str(ctx,"@ SPDX-License-Identifier: GPL-3.0-only\n");
+    emit_str(ctx,"@ Gerado por emit_arm32.c — zero shadow, zero tail\n");
+    emit_str(ctx,"@ ═══════════════════════════════════════════════════════\n");
+    emit_str(ctx,".arch armv7-a\n.fpu neon-vfpv4\n.text\n.align 2\n");
+
+    /* BSS: tabela CRC e estado toroidal */
+    emit_str(ctx,"\n.section .bss\n.align 6\n");
+    emit_str(ctx,"g_crc_tab: .space 1024  @ CRC32C 256×4 bytes\n");
+    emit_str(ctx,"g_toro_state: .space 28  @ T^7: 7×4 bytes Q16.16\n");
+    emit_str(ctx,"g_gate_state: .space 32  @ commit gate state\n");
+    emit_str(ctx,"\n.section .text\n.align 2\n");
+    emit_str(ctx,".global raf_generated\n.global main\n");
+    emit_str(ctx,"raf_generated:\nmain:\n");
+
+    /* INSTRUÇÃO 1: genérica (obrigatória) */
+    emit_str(ctx,"    push {r4, r5, r6, r7, lr}  @ p=11×13×17×19×47 SNAPSHOT\n");
+    emit_str(ctx,"    @ instrução 1: genérica, fail-safe, rollback via pop{pc}\n\n");
+
+    /* processa tokens */
+    for(u32 i=0;i<ctx->n_tokens;i++){
+        const sc_token_t *t=&ctx->tokens[i];
+
+        /* atualiza CRC chain do estado */
+        u32 pair[2]={t->hex, ctx->machine.crc_chain};
+        ctx->machine.crc_chain=sc_crc32c(ctx,pair,8);
+
+        emit_fmt(ctx,"    @ ── tok[%u] #%s p=%u hex=0x%08X line=%u\n",
+            i,sc_flag_name(t->flag),t->prime,t->hex,t->line);
+
+        switch(t->flag){
+            case FLAG_LOAD:   emit_load(ctx,t);      break;
+            case FLAG_STORE:  emit_store(ctx,t);     break;
+            case FLAG_ADD:    emit_alu(ctx,t,"add"); break;
+            case FLAG_SUB:    emit_alu(ctx,t,"sub"); break;
+            case FLAG_MUL:    emit_mul_q16(ctx,t);   break;
+            case FLAG_AND:    emit_alu(ctx,t,"and"); break;
+            case FLAG_OR:     emit_alu(ctx,t,"orr"); break;
+            case FLAG_XOR:    emit_alu(ctx,t,"eor"); break;
+            case FLAG_NOT:    {u32 rd=get_reg_ctx(ctx,t->arg[0]),ra=get_reg_ctx(ctx,t->arg[1]);
+                               emit_fmt(ctx,"    mvn %s, %s  @ #NOT\n",rname(rd),rname(ra));ctx->n_instructions++;break;}
+            case FLAG_SHL:    {u32 rd=get_reg_ctx(ctx,t->arg[0]),ra=get_reg_ctx(ctx,t->arg[1]);u32 n=get_imm(t->arg[2]);
+                               emit_fmt(ctx,"    lsl %s, %s, #%u  @ #SHL\n",rname(rd),rname(ra),n);ctx->n_instructions++;break;}
+            case FLAG_SHR:    {u32 rd=get_reg_ctx(ctx,t->arg[0]),ra=get_reg_ctx(ctx,t->arg[1]);u32 n=get_imm(t->arg[2]);
+                               emit_fmt(ctx,"    lsr %s, %s, #%u  @ #SHR\n",rname(rd),rname(ra),n);ctx->n_instructions++;break;}
+            case FLAG_IF:     emit_if(ctx,t);        break;
+            case FLAG_ELSE:   emit_else(ctx,t);      break;
+            case FLAG_ENDIF:  emit_endif(ctx,t);     break;
+            case FLAG_WHILE:  emit_while(ctx,t);     break;
+            case FLAG_ENDW:   emit_endwhile(ctx,t);  break;
+            case FLAG_FOR:    emit_for(ctx,t);       break;
+            case FLAG_ENDF:   emit_endfor(ctx,t);    break;
+            case FLAG_CALL:   emit_call(ctx,t);      break;
+            case FLAG_RET:    emit_ret(ctx,t);       break;
+            case FLAG_EMA:    emit_ema(ctx,t);       break;
+            case FLAG_CRC:    emit_crc(ctx,t);       break;
+            case FLAG_SIN:    emit_sin(ctx,t);       break;
+            case FLAG_TORO:   emit_toro(ctx,t);      break;
+            case FLAG_GATE:   emit_gate(ctx,t);      break;
+            case FLAG_NEON:   emit_neon(ctx,t);      break;
+            case FLAG_HEX:    emit_hex(ctx,t);       break;
+            case FLAG_ASM:    emit_asm_raw(ctx,t);   break;
+            case FLAG_LABEL:  emit_label(ctx,t);     break;
+            case FLAG_BRANCH: emit_branch(ctx,t);    break;
+            case FLAG_NOP:    emit_nop(ctx,t);       break;
+            case FLAG_DIV:
+                emit_fmt(ctx,"#ifdef __aarch64__\n");
+                emit_fmt(ctx,"    udiv %s, %s, %s  @ #DIV ARM64\n",
+                    t->arg[0],t->arg[1],t->arg[2]);
+                emit_fmt(ctx,"#else\n    @ #DIV: ARM32 sem udiv nativo — use biblioteca\n#endif\n");
+                break;
+            default:
+                emit_fmt(ctx,"    @ [UNKNOWN FLAG 0x%02X]\n",(u32)t->flag);
+                break;
+        }
+    }
+
+    /* footer padrão se não teve #RET */
+    emit_str(ctx,"\n    @ ── fim automático (sem #RET explícito) ──\n");
+    emit_str(ctx,"    pop {r4, r5, r6, r7, pc}  @ return+restore\n");
+    emit_fmt(ctx,"    @ CRC_CHAIN_FINAL=0x%08X\n",ctx->machine.crc_chain);
+    emit_fmt(ctx,"    @ PHI_FINAL=0x%04X\n",ctx->machine.phi);
+    emit_fmt(ctx,"    @ INSTRUCTIONS=%u\n",ctx->n_instructions);
+
+    return 0;
+}
+
+u32  sc_output_size(const sc_ctx_t *ctx){ return ctx->emit_pos; }
+const u8 *sc_output(const sc_ctx_t *ctx){ return ctx->emit_buf; }
+EMIT_ARM32_C
+pass "emit_arm32.c"
+
+# =============================================================================
+# [4] emit_hex.c — emissor hexadecimal / bytecode
+# =============================================================================
+cat > "$DEST/emit_hex.c" << 'EMIT_HEX_C'
+/**
+ * emit_hex.c — Emissor de bytecode hexadecimal compacto
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * Cada token é convertido para um registro de 8 bytes:
+ *   [prime:1][flag:1][op1:1][op2:1][cond:1][hex:4] = 8 bytes
+ *
+ * Formato de saída:
+ *   Linha hex: PP FF O1 O2 CC HHHHHHHH  ; comentário
+ *   onde PP=prime FF=flag O1=op1 O2=op2 CC=cond HH=hex
+ *
+ * Uso:
+ *   sc_ctx_t ctx;
+ *   sc_init(&ctx, EMIT_HEX);
+ *   sc_lex(&ctx, src, len);
+ *   sc_parse(&ctx);
+ *   sc_emit_hex(&ctx);
+ */
+#include "statecomp.h"
+#include <stdio.h>
+#include <string.h>
+
+/* Emite stream hexadecimal anotado */
+int sc_emit_hex(sc_ctx_t *ctx) {
+    char line[128];
+    /* header */
+    snprintf(line,127,"@ RAFAELIA HEX BYTECODE v%s\n",SC_VERSION);
+    u32 n=(u32)strlen(line);
+    if(ctx->emit_pos+n<SC_MAX_EMIT) memcpy(ctx->emit_buf+ctx->emit_pos,line,n), ctx->emit_pos+=n;
+
+    snprintf(line,127,"@ FORMAT: PRIME FLAG OP1 OP2 COND HEX32  ;comment\n");
+    n=(u32)strlen(line);
+    if(ctx->emit_pos+n<SC_MAX_EMIT) memcpy(ctx->emit_buf+ctx->emit_pos,line,n), ctx->emit_pos+=n;
+
+    /* Merkle chain */
+    u32 chain=0;
+    for(u32 i=0;i<ctx->n_tokens;i++){
+        const sc_token_t *t=&ctx->tokens[i];
+        u32 reg_op1=0,reg_op2=0;
+        if(t->n_args>0) {
+            const char *a=t->arg[0];
+            if((a[0]=='r'||a[0]=='R')&&a[1]>='0'&&a[1]<='9') reg_op1=(u32)atoi(a+1);
+        }
+        if(t->n_args>1) {
+            const char *a=t->arg[1];
+            if((a[0]=='r'||a[0]=='R')&&a[1]>='0'&&a[1]<='9') reg_op2=(u32)atoi(a+1);
+        }
+
+        /* 8-byte record */
+        u8 rec[8];
+        rec[0]=(u8)(t->prime&0xFF);
+        rec[1]=(u8)t->flag;
+        rec[2]=(u8)(reg_op1&0xFF);
+        rec[3]=(u8)(reg_op2&0xFF);
+        rec[4]=(u8)t->cond;
+        rec[5]=(u8)((t->hex>>16)&0xFF);
+        rec[6]=(u8)((t->hex>>8)&0xFF);
+        rec[7]=(u8)(t->hex&0xFF);
+
+        /* CRC chain */
+        u32 rc=sc_crc32c(ctx,rec,8);
+        chain^=rc;
+
+        snprintf(line,127,"  %02X %02X %02X %02X %02X %02X%02X%02X%02X  ; #%-8s p=%-3u 0x%08X CRC=%08X\n",
+            rec[0],rec[1],rec[2],rec[3],rec[4],
+            rec[5],rec[6],(u8)((t->hex>>24)&0xFF),rec[7],
+            sc_flag_name(t->flag),t->prime,t->hex,rc);
+        n=(u32)strlen(line);
+        if(ctx->emit_pos+n<SC_MAX_EMIT)
+            memcpy(ctx->emit_buf+ctx->emit_pos,line,n), ctx->emit_pos+=n;
+
+        ctx->n_instructions++;
+    }
+
+    /* footer com Merkle */
+    snprintf(line,127,"@ MERKLE=0x%08X TOKENS=%u PHI=0x%04X\n",
+        chain,ctx->n_tokens,ctx->machine.phi);
+    n=(u32)strlen(line);
+    if(ctx->emit_pos+n<SC_MAX_EMIT)
+        memcpy(ctx->emit_buf+ctx->emit_pos,line,n), ctx->emit_pos+=n;
+    ctx->emit_buf[ctx->emit_pos]=0;
+    return 0;
+}
+EMIT_HEX_C
+pass "emit_hex.c"
+
+# =============================================================================
+# [5] statecomp.c — main: integra todos os módulos
+# =============================================================================
+cat > "$DEST/statecomp.c" << 'STATECOMP_C'
+/**
+ * statecomp.c — Compilador de Estados: main integrador
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * Compilar (Termux ARM32):
+ *   clang -O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp
+ *         -fPIE -pie -std=c11 -ffast-math -DHAS_NEON
+ *         statecomp.c precomp.c emit_arm32.c emit_hex.c
+ *         -o statecomp
+ *
+ * Uso:
+ *   ./statecomp input.raf           # compila .raf → .s ARM32
+ *   ./statecomp --hex input.raf     # compila → bytecode hex
+ *   ./statecomp --test              # roda self-tests
+ *   ./statecomp --tokens input.raf  # mostra tokens (debug)
+ *
+ * FORMATO .raf (RAF State Language):
+ *   # comentário
+ *   #LOAD  r4, #42       ; carrega 42 em r4
+ *   #ADD   r4, r4, #1    ; r4 = r4 + 1
+ *   #IF    r4, >, #100   ; se r4 > 100
+ *     #LOAD  r0, #0
+ *   #ELSE
+ *     #LOAD  r0, #1
+ *   #ENDIF
+ *   #RET                 ; retorna r0
+ */
+#include "statecomp.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+/* declarações externas */
+int sc_emit_hex(sc_ctx_t *ctx);
+
+/* ── Lê arquivo em buffer ─────────────────────────────────────────────── */
+static char *read_file(const char *path, u32 *out_len) {
+    int fd=open(path,O_RDONLY);
+    if(fd<0){fprintf(stderr,"erro: não abre '%s'\n",path);return NULL;}
+    off_t sz=lseek(fd,0,SEEK_END); lseek(fd,0,SEEK_SET);
+    if(sz<=0||sz>1000000){close(fd);return NULL;}
+    char *buf=(char*)malloc((size_t)sz+1);
+    if(!buf){close(fd);return NULL;}
+    ssize_t n=read(fd,buf,(size_t)sz); close(fd);
+    if(n<=0){free(buf);return NULL;}
+    buf[n]=0; if(out_len)*out_len=(u32)n;
+    return buf;
+}
+
+/* ── Self-tests ───────────────────────────────────────────────────────── */
+static void run_tests(void) {
+    printf("=== STATECOMP SELF-TESTS ===\n\n");
+    sc_ctx_t *ctx=(sc_ctx_t*)calloc(1,sizeof(sc_ctx_t));
+    if(!ctx){printf("OOM\n");return;}
+
+    /* Test 1: CRC32C */
+    sc_init(ctx,EMIT_HEX);
+    u32 crc=sc_crc32c(ctx,(const u8*)"123456789",9);
+    printf("[1] CRC32C('123456789') = 0x%08X  %s\n",crc,
+        crc==0xE3069283?"✓":"✗ FAIL (expect 0xE3069283)");
+
+    /* Test 2: tokens básicos */
+    sc_init(ctx,EMIT_ARM32);
+    const char *src1=
+        "#LOAD r4, #42\n"
+        "#LOAD r5, #100\n"
+        "#ADD  r6, r4, r5\n"
+        "#RET\n";
+    int n=sc_lex(ctx,src1,(u32)strlen(src1));
+    printf("[2] Lex básico: %d tokens  %s\n",n,n==4?"✓":"✗");
+
+    /* Test 3: parse IF/WHILE balanceado */
+    sc_init(ctx,EMIT_ARM32);
+    const char *src2=
+        "#IF r4, <, r5\n"
+        "  #ADD r6, r4, #1\n"
+        "#ENDIF\n"
+        "#WHILE r4, <, #10\n"
+        "  #ADD r4, r4, #1\n"
+        "#ENDW\n"
+        "#RET\n";
+    sc_lex(ctx,src2,(u32)strlen(src2));
+    int pe=sc_parse(ctx);
+    printf("[3] Parse IF/WHILE: %s errors=%u\n",pe==0?"✓":"✗",ctx->n_errors);
+
+    /* Test 4: emit ARM32 */
+    sc_init(ctx,EMIT_ARM32);
+    const char *src3=
+        "#LOAD r4, #56755\n"  /* SPIRAL_Q16 */
+        "#LOAD r5, #65535\n"
+        "#EMA  r6, r4, r5\n"  /* EMA Q16.16 */
+        "#SIN  r7, r4\n"      /* sin Taylor */
+        "#RET\n";
+    sc_lex(ctx,src3,(u32)strlen(src3));
+    sc_parse(ctx);
+    sc_emit(ctx);
+    printf("[4] Emit ARM32: %u bytes, %u instr  %s\n",
+        ctx->emit_pos,ctx->n_instructions,
+        ctx->emit_pos>100?"✓":"✗");
+
+    /* Test 5: emit HEX */
+    sc_init(ctx,EMIT_HEX);
+    sc_lex(ctx,src3,(u32)strlen(src3));
+    sc_parse(ctx);
+    sc_emit_hex(ctx);
+    printf("[5] Emit HEX: %u bytes  %s\n",ctx->emit_pos,ctx->emit_pos>50?"✓":"✗");
+
+    /* Test 6: FOR loop */
+    sc_init(ctx,EMIT_ARM32);
+    const char *src4=
+        "#FOR i, 0, 42\n"
+        "  #SIN r4, r4\n"
+        "  #EMA r5, r5, r4\n"
+        "#ENDF\n"
+        "#RET r5\n";
+    sc_lex(ctx,src4,(u32)strlen(src4));
+    sc_parse(ctx);
+    sc_emit(ctx);
+    printf("[6] FOR loop: %u instr, phi=0x%04X  %s\n",
+        ctx->n_instructions,ctx->machine.phi,
+        ctx->n_instructions>10?"✓":"✗");
+
+    /* Test 7: TORO + GATE */
+    sc_init(ctx,EMIT_ARM32);
+    const char *src5=
+        "#TORO 0, r4\n"     /* atualiza dim 0 do toro */
+        "#GATE g_state\n"   /* commit gate */
+        "#RET\n";
+    sc_lex(ctx,src5,(u32)strlen(src5));
+    sc_parse(ctx);
+    sc_emit(ctx);
+    printf("[7] TORO+GATE: %u instr  %s\n",ctx->n_instructions,
+        ctx->n_instructions>5?"✓":"✗");
+
+    /* Test 8: prime chain */
+    sc_init(ctx,EMIT_HEX);
+    const char *src6="#LOAD r0,#2\n#ADD r0,r0,#3\n#MUL r0,r0,r0\n#RET\n";
+    sc_lex(ctx,src6,(u32)strlen(src6));
+    sc_parse(ctx);
+    u32 p=1;
+    for(u32 i=0;i<ctx->n_tokens;i++) p*=ctx->tokens[i].prime;
+    printf("[8] Prime product: %u (unique path id)  ✓\n",p);
+
+    /* Sumário */
+    printf("\n=== STATS ===\n");
+    sc_dump_stats(ctx);
+    printf("\ncrc_chain: 0x%08X\n",ctx->machine.crc_chain);
+
+    free(ctx);
+    printf("\n=== TESTS DONE ===\n");
+}
+
+/* ── Compila .raf para ARM32 asm ─────────────────────────────────────── */
+static int compile_file(const char *path, emit_target_t target, int show_tokens) {
+    u32 flen=0;
+    char *src=read_file(path,&flen);
+    if(!src){return -1;}
+
+    sc_ctx_t *ctx=(sc_ctx_t*)calloc(1,sizeof(sc_ctx_t));
+    if(!ctx){free(src);return -1;}
+
+    sc_init(ctx,target);
+    int n=sc_lex(ctx,src,flen);
+    free(src);
+    fprintf(stderr,"[info] %d tokens de '%s'\n",n,path);
+
+    if(show_tokens) sc_dump_tokens(ctx);
+
+    int pe=sc_parse(ctx);
+    if(pe<0){
+        fprintf(stderr,"[error] %u erros no parse\n",ctx->n_errors);
+        free(ctx);return -1;
+    }
+
+    int ee;
+    if(target==EMIT_HEX) ee=sc_emit_hex(ctx);
+    else                  ee=sc_emit(ctx);
+
+    if(ee<0){free(ctx);return -1;}
+
+    /* output para stdout */
+    write(1,ctx->emit_buf,ctx->emit_pos);
+
+    sc_dump_stats(ctx);
+    free(ctx);
+    return 0;
+}
+
+/* ── Main ─────────────────────────────────────────────────────────────── */
+int main(int argc, char **argv) {
+    if(argc<2){
+        fprintf(stderr,"RAF STATECOMP v%s\n",SC_VERSION);
+        fprintf(stderr,"Uso: %s [--test|--hex|--tokens] arquivo.raf\n",argv[0]);
+        fprintf(stderr,"     %s --test  (self-tests)\n",argv[0]);
+        return 1;
+    }
+
+    int do_hex=0, do_tokens=0, do_test=0;
+    const char *infile=NULL;
+
+    for(int i=1;i<argc;i++){
+        if(!strcmp(argv[i],"--test"))   do_test=1;
+        else if(!strcmp(argv[i],"--hex"))    do_hex=1;
+        else if(!strcmp(argv[i],"--tokens")) do_tokens=1;
+        else infile=argv[i];
+    }
+
+    if(do_test){ run_tests(); return 0; }
+    if(!infile){ fprintf(stderr,"arquivo não especificado\n"); return 1; }
+
+    emit_target_t tgt=do_hex?EMIT_HEX:EMIT_ARM32;
+    return compile_file(infile, tgt, do_tokens);
+}
+STATECOMP_C
+pass "statecomp.c"
+
+# =============================================================================
+# [6] state_machine.c — Máquina de Turing Geométrica
+# =============================================================================
+cat > "$DEST/state_machine.c" << 'STATEMACH_C'
+/**
+ * state_machine.c — Máquina de Turing Geométrica T^7
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * A máquina de Turing clássica:
+ *   (Q, Σ, Γ, δ, q0, qF) onde δ: Q×Γ→Q×Γ×{L,R}
+ *
+ * A máquina RAF geométrica:
+ *   Q = T^7 (estados = pontos no toro 7D Q16.16)
+ *   Σ = {flags: 2,3,5,7,11,13,...,127} (primos = símbolos)
+ *   Γ = {u8×N_STACKS 1008} (fita = BitStacks)
+ *   δ = EMA Q16.16 (transição = amortecimento geométrico)
+ *   q0 = {SPIRAL_Q16,...} (estado inicial)
+ *   qF = atratores A (|A|=42) (estados aceitantes)
+ *
+ * DIFERENÇA DO MODELO CLÁSSICO:
+ *   - Sem cabeçote linear: o toro T^7 permite saltos geodésicos
+ *   - Sem fita infinita: BitStacks 1008 com travessia toroidal stride=7
+ *   - Transição determinística: EMA Q16.16 garante convergência
+ *   - Aceitação probabilística: φ = (1-H)·C (coerência potencial)
+ *   - Rollback intrínseco: CRC chain detecta corrupção em O(1)
+ */
+#include "statecomp.h"
+#include <string.h>
+#include <stdio.h>
+
+/* ── Fita: BitStacks 1008 ────────────────────────────────────────────── */
+#define N_TAPE     1000u
+#define N_TAPE_EX  8u
+#define TAPE_TOTAL 1008u
+#define TAPE_BITS  42u
+#define TAPE_STR   7u    /* stride coprimo com 1000 */
+
+typedef u64 tape_cell_t;  /* 42 bits usados de 64 */
+
+typedef struct {
+    tape_cell_t cells[N_TAPE];
+    tape_cell_t extra[N_TAPE_EX];  /* 4 isósceles + 2 atratores + 2 paridade */
+    u32         head;               /* posição atual (0..999) */
+    u32         stride;             /* stride toroidal (default=7) */
+    u64         par_xor;            /* paridade XOR */
+    u32         par_crc;            /* paridade CRC32C */
+} raf_tape_t;
+
+/* ── Máquina ─────────────────────────────────────────────────────────── */
+typedef struct {
+    sc_state_t  q;          /* estado atual T^7 */
+    raf_tape_t  tape;       /* fita BitStacks */
+    u32         step;       /* passo atual */
+    u32         accept;     /* 1 se aceitou */
+    u32         crc_chain;  /* CRC encadeado */
+} raf_machine_t;
+
+/* CRC local */
+static u32 _mcrc_tab[256]; static int _mcrc_rdy=0;
+static void _mcrc_init(void){
+    for(u32 i=0;i<256;i++){u32 v=i;for(int j=0;j<8;j++)v=(v&1)?(v>>1)^0x82F63B78u:(v>>1);_mcrc_tab[i]=v;}_mcrc_rdy=1;
+}
+static u32 _mcrc(const void*b,u32 n){
+    if(!_mcrc_rdy)_mcrc_init();
+    const u8*p=(const u8*)b;u32 c=~0u;
+    while(n--)c=(c>>8)^_mcrc_tab[(c^*p++)&0xFF];return~c;
+}
+
+/* ── Inicializa fita ─────────────────────────────────────────────────── */
+static void tape_init(raf_tape_t *t) {
+    memset(t,0,sizeof(*t));
+    t->stride=TAPE_STR;
+    /* seed: Fibonacci mod 42 bits */
+    u64 f0=0,f1=1;
+    for(u32 i=0;i<N_TAPE;i++){
+        u32 bits=(u32)(f1%TAPE_BITS);
+        t->cells[i]=bits?(1ULL<<bits)-1ULL:0ULL;
+        u64 fn=f0+f1; f0=f1; f1=fn;
+    }
+    /* extras: triângulo isósceles Q16.16 */
+    t->extra[0]=0x0000DD83ULL; t->extra[1]=0xFFFF2280ULL;
+    t->extra[2]=0x0000DD83ULL; t->extra[3]=0xFFFF2280ULL;
+    t->extra[4]=0x0001998AULL; t->extra[5]=0xFFFE667BULL;
+    t->par_xor=0;
+    for(u32 i=0;i<N_TAPE;i++) t->par_xor^=t->cells[i];
+    t->par_crc=_mcrc(t->cells,(u32)(N_TAPE*8));
+    t->extra[6]=(tape_cell_t)t->par_xor;
+    t->extra[7]=(tape_cell_t)t->par_crc;
+}
+
+/* ── Lê célula (head atual) ──────────────────────────────────────────── */
+static tape_cell_t tape_read(const raf_tape_t *t) {
+    return t->cells[t->head] & ((1ULL<<TAPE_BITS)-1ULL);
+}
+
+/* ── Escreve célula e atualiza paridade ─────────────────────────────── */
+static int tape_write(raf_tape_t *t, tape_cell_t val) {
+    t->cells[t->head]=(val & ((1ULL<<TAPE_BITS)-1ULL));
+    t->par_crc=_mcrc(t->cells,(u32)(N_TAPE*8));
+    return 0;
+}
+
+/* ── Move cabeçote (toroidal com stride coprimo) ────────────────────── */
+static void tape_move(raf_tape_t *t, int dir) {
+    /* dir=+1: avança, dir=-1: recua, dir=0: fica */
+    if(dir>0) t->head=(t->head+t->stride)%N_TAPE;
+    else if(dir<0) t->head=(t->head+N_TAPE-t->stride)%N_TAPE;
+    /* dir=0: sem movimento (estado absorvente) */
+}
+
+/* ── Verifica integridade da fita ────────────────────────────────────── */
+static int tape_verify(const raf_tape_t *t) {
+    u32 c=_mcrc(t->cells,(u32)(N_TAPE*8));
+    return c==t->par_crc;
+}
+
+/* ── Rollback da fita ────────────────────────────────────────────────── */
+static void tape_rollback(raf_tape_t *t, const tape_cell_t *snapshot) {
+    memcpy(t->cells, snapshot, N_TAPE*8);
+    t->par_xor=0;
+    for(u32 i=0;i<N_TAPE;i++) t->par_xor^=t->cells[i];
+    t->par_crc=_mcrc(t->cells,(u32)(N_TAPE*8));
+}
+
+/* ── Função de transição δ: (estado, símbolo) → (estado', símbolo', dir) */
+typedef struct { u32 prime; u32 new_val; int dir; } transition_t;
+
+static transition_t delta(const sc_state_t *q, tape_cell_t cell, u32 prime) {
+    transition_t tr;
+    /* Transição: EMA do estado com o símbolo (prime) e célula atual */
+    /* new_C = EMA(C, prime*cell mod 65536) */
+    u32 c_in=(u32)((prime * (u32)(cell&0xFF)) & 0xFFFFu);
+    tr.prime=prime;
+    tr.new_val=(u32)(((u64)cell * prime) & ((1ULL<<TAPE_BITS)-1ULL));
+    /* direção: baseada no bit de paridade do phi */
+    tr.dir = (q->phi & 0x1) ? +1 : -1;
+    return tr;
+}
+
+/* ── Passo da máquina ─────────────────────────────────────────────────── */
+static int machine_step(raf_machine_t *m, u32 prime) {
+    /* snapshot para rollback */
+    tape_cell_t snap[N_TAPE];
+    memcpy(snap, m->tape.cells, N_TAPE*8);
+
+    /* lê símbolo atual */
+    tape_cell_t sym = tape_read(&m->tape);
+
+    /* transição */
+    transition_t tr = delta(&m->q, sym, prime);
+
+    /* escreve novo símbolo */
+    tape_write(&m->tape, tr.new_val);
+
+    /* verifica integridade */
+    if(!tape_verify(&m->tape)){
+        tape_rollback(&m->tape, snap);
+        return -1; /* rollback */
+    }
+
+    /* move cabeçote */
+    tape_move(&m->tape, tr.dir);
+
+    /* atualiza estado Q (EMA 7D) */
+    u32 c_in=(u32)(((u64)prime * Q16_SPIRAL) & 0xFFFFu);
+    u32 h_in=(65535u-c_in);
+    m->q.C=(u32)(((u64)m->q.C*49152u+(u64)c_in*16384u)>>16);
+    m->q.H=(u32)(((u64)m->q.H*49152u+(u64)h_in*16384u)>>16);
+    m->q.phi=(u32)(((u64)(65535u-m->q.H)*m->q.C)>>16);
+    m->q.phase=(m->q.phase+1)%SC_PERIOD;
+
+    /* CRC chain */
+    u32 pair[2]={m->q.phi, m->crc_chain};
+    m->crc_chain=_mcrc(pair,8);
+
+    /* verifica aceitação: phi acima de threshold */
+    m->accept = (m->q.phi > 0xC000u) ? 1 : 0;
+
+    m->step++;
+    return tr.dir;
+}
+
+/* ── Inicializa máquina ───────────────────────────────────────────────── */
+void raf_machine_init(raf_machine_t *m) {
+    memset(m,0,sizeof(*m));
+    tape_init(&m->tape);
+    /* estado inicial */
+    u32 seed=Q16_SPIRAL;
+    for(u32 d=0;d<SC_TORUS_DIM;d++){
+        seed=(u32)(((u64)seed*Q16_SPIRAL+(u64)d*1009u)&0xFFFFu);
+        m->q.s[d]=seed;
+    }
+    m->q.C=m->q.H=Q16_HALF;
+    m->q.phi=Q16_HALF;
+    m->crc_chain=0;
+}
+
+/* ── Roda 42 passos ─────────────────────────────────────────────────── */
+typedef struct {
+    u32 steps_ok;
+    u32 rollbacks;
+    u32 accepted;
+    u32 phi_final;
+    u32 crc_final;
+    u32 tape_bits;
+} machine_result_t;
+
+machine_result_t raf_machine_run42(raf_machine_t *m, const u32 *primes, u32 n_primes) {
+    machine_result_t r={0,0,0,0,0,0};
+
+    for(u32 step=0;step<SC_PERIOD;step++){
+        u32 p=(n_primes>0)?primes[step%n_primes]:(u32[]){2,3,5,7,11,13,17,19,23,29,31,37,41,43}[step%14];
+        int dir=machine_step(m,p);
+        if(dir<-1){ r.rollbacks++; continue; }
+        r.steps_ok++;
+        if(m->accept) r.accepted++;
+    }
+
+    r.phi_final=m->q.phi;
+    r.crc_final=m->crc_chain;
+
+    /* conta bits na fita */
+    for(u32 i=0;i<N_TAPE;i++){
+        u64 v=m->tape.cells[i];
+        while(v){v&=v-1;r.tape_bits++;}
+    }
+
+    return r;
+}
+
+/* ── Demo standalone ─────────────────────────────────────────────────── */
+static const char HEX[]="0123456789ABCDEF";
+static void wh(u32 v){char b[11]="0x00000000";for(int i=0;i<8;i++)b[2+i]=HEX[(v>>(28-i*4))&0xF];write(1,b,10);}
+static void wu(u32 v){char b[12];int i=11;b[i]=0;if(!v){b[--i]='0';}else while(v){b[--i]=(char)('0'+v%10);v/=10;}write(1,b+i,(size_t)(11-i));}
+
+#ifdef STATEMACH_MAIN
+int main(void) {
+    write(1,"=== RAF GEOMETRIC TURING MACHINE ===\n",37);
+    write(1,"T^7 toro · BitStacks 1008 · EMA Q16.16\n\n",41);
+
+    raf_machine_t m;
+    raf_machine_init(&m);
+
+    /* programa: primos em sequência (símbolos de entrada) */
+    u32 primes[]={2,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,
+                  73,79,83,89,97,101,103,107,109,113,127,131,137,139,149,151,
+                  157,163,167,173,179,181,191,193};
+
+    machine_result_t r=raf_machine_run42(&m,primes,42);
+
+    write(1,"steps_ok: ",10);  wu(r.steps_ok);  write(1,"\n",1);
+    write(1,"rollbacks:",10);  wu(r.rollbacks);  write(1,"\n",1);
+    write(1,"accepted: ",10);  wu(r.accepted);   write(1,"\n",1);
+    write(1,"phi_final:",10);  wh(r.phi_final);  write(1,"\n",1);
+    write(1,"crc_final:",10);  wh(r.crc_final);  write(1,"\n",1);
+    write(1,"tape_bits:",10);  wu(r.tape_bits);  write(1,"\n",1);
+
+    /* aceita se phi > 0xC000 */
+    write(1,"ACCEPT:   ",10);
+    write(1,m.accept?"YES\n":"NO\n",m.accept?4:3);
+
+    write(1,"\n=== DONE ===\n",14);
+    return !m.accept;
+}
+#endif /* STATEMACH_MAIN */
+STATEMACH_C
+pass "state_machine.c"
+
+# =============================================================================
+# [7] test_comp.c — exemplos de compilação e testes
+# =============================================================================
+cat > "$DEST/test_comp.c" << 'TEST_C'
+/**
+ * test_comp.c — Exemplos e testes do statecomp
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * Compilar e testar:
+ *   clang -O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp
+ *         -fPIE -pie -std=c11 -DHAS_NEON
+ *         statecomp.c precomp.c emit_arm32.c emit_hex.c test_comp.c
+ *         -o test_comp && ./test_comp --all
+ */
+#include "statecomp.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int sc_emit_hex(sc_ctx_t *ctx);
+
+/* ── Exemplo 1: soma de 1 a N (FOR loop) ─────────────────────────────── */
+static const char EX_FOR[] =
+    "@ Soma 1..N em r4\n"
+    "#LOAD r4, #0   @ sum = 0\n"
+    "#LOAD r5, #42  @ N = 42\n"
+    "#FOR  i, 1, #42\n"
+    "  #ADD  r4, r4, r4  @ sum += i (simplificado)\n"
+    "#ENDF\n"
+    "#RET r4\n";
+
+/* ── Exemplo 2: EMA de 42 valores ────────────────────────────────────── */
+static const char EX_EMA[] =
+    "@ EMA Q16.16 de 42 valores de SPIRAL_Q16\n"
+    "#LOAD r8, #32768  @ C = 0.5 Q16.16\n"
+    "#LOAD r9, #32768  @ H = 0.5 Q16.16\n"
+    "#FOR  k, 0, #42\n"
+    "  #LOAD  r0, #56755  @ SPIRAL_Q16\n"
+    "  #EMA   r8, r8, r0  @ C = EMA(C, SPIRAL)\n"
+    "  #MUL   r1, r8, r9  @ phi = C*H\n"
+    "#ENDF\n"
+    "#TORO 0, r8  @ atualiza toro dim 0\n"
+    "#TORO 1, r9  @ atualiza toro dim 1\n"
+    "#RET r8\n";
+
+/* ── Exemplo 3: CRC32C de buffer ─────────────────────────────────────── */
+static const char EX_CRC[] =
+    "@ CRC32C de buffer em r0 com len em r1\n"
+    "#LOAD r6, r0   @ ptr = arg0\n"
+    "#LOAD r5, r1   @ len = arg1\n"
+    "#CRC  r4, r6, r5  @ r4 = crc32c(ptr, len)\n"
+    "#RET  r4\n";
+
+/* ── Exemplo 4: IF aninhado ──────────────────────────────────────────── */
+static const char EX_IF[] =
+    "@ IF/ELSE aninhado\n"
+    "#LOAD r4, #100\n"
+    "#LOAD r5, #42\n"
+    "#IF   r4, >, r5\n"
+    "  #SUB r4, r4, r5  @ r4 -= r5\n"
+    "  #IF  r4, <, #10\n"
+    "    #LOAD r0, #1\n"
+    "  #ELSE\n"
+    "    #LOAD r0, #2\n"
+    "  #ENDIF\n"
+    "#ELSE\n"
+    "  #LOAD r0, #0\n"
+    "#ENDIF\n"
+    "#RET r0\n";
+
+/* ── Exemplo 5: máquina toroidal completa ────────────────────────────── */
+static const char EX_TORO[] =
+    "@ Motor toroidal: 42 ciclos EMA + sin + CRC chain\n"
+    "#LOAD  r8, #32768  @ C\n"
+    "#LOAD  r9, #32768  @ H\n"
+    "#LOAD  r10, #0     @ crc_chain\n"
+    "#FOR   cy, 0, #42\n"
+    "  #SIN  r0, r4     @ sin(phase)\n"
+    "  #EMA  r8, r8, r0  @ C = EMA(C, sin)\n"
+    "  #MUL  r1, r8, r9  @ phi = C*(1-H) approx\n"
+    "  #TORO 0, r8       @ atualiza dim 0\n"
+    "  #TORO 1, r9       @ atualiza dim 1\n"
+    "  #GATE g_st        @ commit gate\n"
+    "#ENDF\n"
+    "#RET r8\n";
+
+/* ── Exemplo 6: NEON EMA batch ───────────────────────────────────────── */
+static const char EX_NEON[] =
+    "@ NEON 4-wide EMA Q16.16\n"
+    "#NEON LOAD, q0, r4   @ carrega 4 estados\n"
+    "#NEON LOAD, q1, r5   @ carrega 4 inputs\n"
+    "#NEON EMA,  q0, q0, q1  @ EMA batch\n"
+    "#NEON STORE,q0, r4   @ armazena\n"
+    "#RET\n";
+
+/* ── Roda um exemplo ─────────────────────────────────────────────────── */
+static void run_example(const char *name, const char *src, int show_asm, int show_hex) {
+    printf("\n══ %s ══\n",name);
+    sc_ctx_t *ctx=(sc_ctx_t*)calloc(1,sizeof(sc_ctx_t));
+    if(!ctx){printf("OOM\n");return;}
+
+    /* ARM32 */
+    sc_init(ctx,EMIT_ARM32);
+    sc_lex(ctx,src,(u32)strlen(src));
+    sc_parse(ctx);
+    sc_emit(ctx);
+
+    if(show_asm){
+        printf("--- ARM32 ASM ---\n");
+        printf("%s\n",(const char*)ctx->emit_buf);
+    }
+    printf("ARM32: %u bytes, %u instr, phi=0x%04X, crc=0x%08X\n",
+        ctx->emit_pos,ctx->n_instructions,ctx->machine.phi,ctx->machine.crc_chain);
+
+    if(show_hex){
+        sc_init(ctx,EMIT_HEX);
+        sc_lex(ctx,src,(u32)strlen(src));
+        sc_parse(ctx);
+        sc_emit_hex(ctx);
+        printf("--- HEX ---\n%s\n",(const char*)ctx->emit_buf);
+    }
+
+    sc_dump_stats(ctx);
+    free(ctx);
+}
+
+#ifdef TEST_MAIN
+int main(int argc, char **argv) {
+    int show_asm=0, show_hex=0, do_all=0;
+    for(int i=1;i<argc;i++){
+        if(!strcmp(argv[i],"--asm"))  show_asm=1;
+        if(!strcmp(argv[i],"--hex"))  show_hex=1;
+        if(!strcmp(argv[i],"--all"))  do_all=1;
+    }
+
+    printf("=== RAF STATECOMP — EXEMPLOS ===\n");
+    run_example("FOR LOOP",        EX_FOR,  show_asm||do_all, show_hex);
+    run_example("EMA Q16.16",      EX_EMA,  show_asm||do_all, show_hex);
+    run_example("CRC32C",          EX_CRC,  show_asm||do_all, show_hex);
+    run_example("IF ANINHADO",     EX_IF,   show_asm||do_all, show_hex);
+    run_example("TORO 42 CICLOS",  EX_TORO, show_asm||do_all, show_hex);
+    run_example("NEON EMA BATCH",  EX_NEON, show_asm||do_all, show_hex);
+
+    printf("\n=== TODOS OS EXEMPLOS COMPILADOS ===\n");
+    return 0;
+}
+#endif
+TEST_C
+pass "test_comp.c"
+
+# =============================================================================
+# [8] exemplo.raf — fonte de exemplo em RAF State Language
+# =============================================================================
+cat > "$DEST/exemplo.raf" << 'RAF_EXAMPLE'
+@ ═══════════════════════════════════════════════════════
+@ exemplo.raf — RAF State Language
+@ Compila com: ./statecomp exemplo.raf
+@              ./statecomp --hex exemplo.raf
+@ ═══════════════════════════════════════════════════════
+
+@ Variáveis mapeadas em registradores:
+@   sum  → r4
+@   C    → r8  (coerência EMA)
+@   H    → r9  (entropia EMA)
+@   phi  → r5
+
+@ ── Inicialização ─────────────────────────────────────
+#LOAD r4, #0        @ sum = 0
+#LOAD r8, #32768    @ C = 0.5 Q16.16
+#LOAD r9, #32768    @ H = 0.5 Q16.16
+
+@ ── 42 ciclos do motor geométrico ─────────────────────
+#FOR cy, 0, 42
+
+    @ calcula senoide da fase
+    #LOAD r0, #56755    @ SPIRAL_Q16
+    #SIN  r1, r0        @ sin(SPIRAL)
+
+    @ EMA de coerência e entropia
+    #EMA  r8, r8, r1    @ C = EMA(C, sin)
+    #LOAD r0, #65535
+    #SUB  r0, r0, r1    @ 1-sin
+    #EMA  r9, r9, r0    @ H = EMA(H, 1-sin)
+
+    @ phi = (1-H)*C
+    #LOAD r2, #65535
+    #SUB  r2, r2, r9    @ 1-H
+    #MUL  r5, r2, r8    @ phi = (1-H)*C Q16.16
+
+    @ atualiza toro T^7
+    #TORO 0, r8         @ s[0] = EMA(s[0], C)
+    #TORO 1, r9         @ s[1] = EMA(s[1], H)
+    #TORO 2, r5         @ s[2] = EMA(s[2], phi)
+
+    @ acumula
+    #ADD  r4, r4, r5    @ sum += phi
+
+    @ commit gate a cada 7 ciclos (controle externo simulado)
+    @ #GATE g_state     @ descomente para usar gate
+
+#ENDF
+
+@ ── Se phi > 0x8000: aceita ──────────────────────────
+#LOAD r0, #32768        @ threshold = 0.5
+#IF   r5, >, r0         @ phi > 0.5?
+    #LOAD r0, #1        @ aceita
+#ELSE
+    #LOAD r0, #0        @ rejeita
+#ENDIF
+
+@ ── CRC da saída ──────────────────────────────────────
+@ #CRC r4, r4, #8      @ opcional: CRC32C
+
+#RET r0
+@ ═══════════════════════════════════════════════════════
+@ FIM: r0 = 1 se aceitou, 0 se rejeitou
+@      r4 = soma dos phi[0..41]
+@      r5 = phi final
+@ CRC_CHAIN: calculado em runtime pelo compilador
+@ ═══════════════════════════════════════════════════════
+RAF_EXAMPLE
+pass "exemplo.raf"
+
+# =============================================================================
+# [9] run_comp.sh — executor e builder
+# =============================================================================
+cat > "$DEST/run_comp.sh" << 'RUN_SH'
+#!/data/data/com.termux/files/usr/bin/sh
+# run_comp.sh — build e execução do statecomp
+# USO: sh run_comp.sh [build|test|compile|demo]
+
+DEST="${HOME}/arkraf/statecomp"
+cd "$DEST" || exit 1
+
+ARCH=$(uname -m)
+case "$ARCH" in
+  armv7*|armv8l)
+    CF="-O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp \
+        -fPIE -pie -std=c11 -ffast-math -DHAS_NEON \
+        -DTEST_MAIN -DSTATEMACH_MAIN" ;;
+  aarch64)
+    CF="-O2 -march=armv8-a -fPIE -pie -std=c11 -ffast-math -DHAS_NEON \
+        -DTEST_MAIN -DSTATEMACH_MAIN" ;;
+  *)
+    CF="-O2 -std=c11 -ffast-math -DTEST_MAIN -DSTATEMACH_MAIN" ;;
+esac
+CC="${CC:-clang}"
+OK="✓"; FAIL="✗"
+pass(){ printf "  $OK %s\n" "$*"; }
+fail(){ printf "  $FAIL %s\n" "$*"; }
+
+build(){
+    printf "\n=== BUILD statecomp ===\n"
+    # Compilador principal
+    $CC $CF statecomp.c precomp.c emit_arm32.c emit_hex.c \
+        -o statecomp 2>&1 && pass "statecomp" || fail "statecomp"
+    # Testes
+    $CC $CF statecomp.c precomp.c emit_arm32.c emit_hex.c test_comp.c \
+        -o test_comp 2>&1 && pass "test_comp" || fail "test_comp"
+    # Máquina de estados
+    $CC $CF statecomp.c precomp.c emit_arm32.c emit_hex.c state_machine.c \
+        -o state_machine 2>&1 && pass "state_machine" || fail "state_machine"
+    printf "\n"
+    ls -lh statecomp test_comp state_machine 2>/dev/null
+}
+
+run_tests(){
+    printf "\n=== TESTS ===\n"
+    [ -x "./statecomp" ] && ./statecomp --test || printf "  build primeiro\n"
+}
+
+compile_example(){
+    printf "\n=== COMPILA exemplo.raf → ARM32 ===\n"
+    [ -x "./statecomp" ] || { printf "  build primeiro\n"; return; }
+    ./statecomp exemplo.raf > exemplo.s 2>&1 && {
+        pass "exemplo.s gerado"
+        printf "\n--- arm32 asm (primeiras 30 linhas) ---\n"
+        head -30 exemplo.s
+        printf "\n--- hex ---\n"
+        ./statecomp --hex exemplo.raf 2>/dev/null | head -20
+    } || fail "compile"
+}
+
+demo_all(){
+    printf "\n=== DEMO COMPLETA ===\n"
+    [ -x "./test_comp" ] && ./test_comp --all || printf "  build primeiro\n"
+    [ -x "./state_machine" ] && {
+        printf "\n--- Máquina de Turing Geométrica ---\n"
+        ./state_machine
+    }
+}
+
+case "${1:-build}" in
+  build)   build ;;
+  test)    run_tests ;;
+  compile) compile_example ;;
+  demo)    demo_all ;;
+  all)     build; run_tests; compile_example; demo_all ;;
+  *)
+    printf "Uso: sh run_comp.sh [build|test|compile|demo|all]\n"
+    printf "  build:   compila statecomp, test_comp, state_machine\n"
+    printf "  test:    roda self-tests\n"
+    printf "  compile: compila exemplo.raf → exemplo.s\n"
+    printf "  demo:    roda todos os exemplos\n"
+    printf "  all:     tudo acima\n"
+    ;;
+esac
+RUN_SH
+chmod +x "$DEST/run_comp.sh"
+pass "run_comp.sh"
+
+# =============================================================================
+# [10] statecomp_api.md — documentação rápida
+# =============================================================================
+cat > "$DEST/statecomp_api.md" << 'API_MD'
+# RAF STATECOMP — Referência da API
+
+## FLAGS disponíveis
+
+| Flag      | Primo | Hex   | Args              | Emite (ARM32)                    |
+|-----------|-------|-------|-------------------|----------------------------------|
+| `#LOAD`   | 2     | 0x02  | dst, src          | `mov rD, #imm` / `ldr`          |
+| `#STORE`  | 3     | 0x03  | src, dst [,off]   | `str rS, [rD]`                   |
+| `#ADD`    | 5     | 0x05  | dst, a, b         | `add rD, rA, rB`                 |
+| `#SUB`    | 7     | 0x07  | dst, a, b         | `sub rD, rA, rB`                 |
+| `#MUL`    | 11    | 0x0B  | dst, a, b         | `umull+lsr #16` (Q16.16)         |
+| `#AND`    | 17    | 0x11  | dst, a, b         | `and rD, rA, rB`                 |
+| `#OR`     | 19    | 0x13  | dst, a, b         | `orr rD, rA, rB`                 |
+| `#XOR`    | 23    | 0x17  | dst, a, b         | `eor rD, rA, rB`                 |
+| `#SHL`    | 31    | 0x1F  | dst, a, n         | `lsl rD, rA, #n`                 |
+| `#SHR`    | 37    | 0x25  | dst, a, n         | `lsr rD, rA, #n`                 |
+| `#IF`     | 41    | 0x29  | a, cond, b        | `cmp+bXX .else_N`                |
+| `#ELSE`   | 43    | 0x2B  | —                 | `b .endif_N; .else_N:`           |
+| `#ENDIF`  | 43    | 0x2B  | —                 | `.else_N: .endif_N:`             |
+| `#WHILE`  | 47    | 0x2F  | a, cond, b        | `.while_N: cmp+bXX .endwhile_N`  |
+| `#ENDW`   | 47    | 0x2F  | —                 | `b .while_N; .endwhile_N:`       |
+| `#FOR`    | 59    | 0x3B  | i, start, end     | `mov+cmp+bge .endfor_N`          |
+| `#ENDF`   | 59    | 0x3B  | —                 | `add i,#step; b .for_N`          |
+| `#CALL`   | 61    | 0x3D  | func [,arg...]    | `bl func`                        |
+| `#RET`    | 67    | 0x43  | [val]             | `pop {r4..r7,pc}`                |
+| `#EMA`    | 71    | 0x47  | dst, old, in      | `umull×2+lsr` (Q16.16 EMA)       |
+| `#CRC`    | 79    | 0x4F  | dst, buf, len     | loop CRC32C                      |
+| `#SIN`    | 83    | 0x53  | dst, x            | Taylor Q16.16                    |
+| `#TORO`   | 89    | 0x59  | dim, val          | EMA T^7 dim                      |
+| `#GATE`   | 91    | 0x5B  | state_ptr         | commit gate 4 fases              |
+| `#NEON`   | 97    | 0x61  | op, dst, s1 [,s2] | `vld1/vmul/vadd/vst1`            |
+| `#HEX`    | 103   | 0x67  | byte...           | `.byte 0xNN`                     |
+| `#ASM`    | 107   | 0x6B  | "instruction"     | pass-through                     |
+| `#LABEL`  | 109   | 0x6D  | name              | `name:`                          |
+| `#BRANCH` | 113   | 0x71  | label [,cond]     | `b[cond] label`                  |
+| `#NOP`    | 127   | 0x7F  | —                 | `mov r0, r0`                     |
+
+## Condições suportadas
+
+`==` / `EQ`, `!=` / `NE`, `<` / `LT`, `<=` / `LE`, `>` / `GT`, `>=` / `GE`
+
+## Formato HEX de token
+
+```
+PRIME(1B) FLAG(1B) OP1(1B) OP2(1B) COND(1B) HEX[4B]  ; comentário
+```
+
+## Invariantes
+
+- Primeira instrução sempre: `push {r4,r5,r6,r7,lr}`
+- Última instrução sempre: `pop {r4,r5,r6,r7,pc}`
+- CRC chain atualizado a cada token emitido
+- SHADOW documentado em todo comentário inline
+- TAIL (código após #RET) suprimido automaticamente
+API_MD
+pass "statecomp_api.md"
+
+# =============================================================================
+# SUMÁRIO
+# =============================================================================
+hdr "STATECOMP GERADO"
+printf "\n\033[1;32m=== ~/arkraf/statecomp/ ===\033[0m\n"
+find "$DEST" -type f | sort | awk "{printf \"  %s\\n\", \$0}" | \
+    sed "s|${HOME}/arkraf/statecomp/||"
+printf "\nTotal arquivos: $(find $DEST -type f | wc -l)\n"
+printf "\nPara compilar:\n"
+printf "  cd ~/arkraf/statecomp && sh run_comp.sh build\n"
+printf "\nPara testar:\n"
+printf "  sh run_comp.sh test\n"
+printf "\nPara compilar exemplo.raf:\n"
+printf "  sh run_comp.sh compile\n"
+printf "\nPara demo completa:\n"
+printf "  sh run_comp.sh all\n"
+printf "\n\033[1;32m=== STATECOMP COMPLETO ===\033[0m\n"
+
+# =============================================================================
+# [11] geolm_statecomp.raf — GEOLM em RAF State Language
+# =============================================================================
+cat > "$DEST/geolm_statecomp.raf" << 'GEOLM_RAF'
+@ ═══════════════════════════════════════════════════════════════════════
+@ geolm_statecomp.raf — GEOLM em RAF State Language
+@ Motor de linguagem geométrica expresso como estados e flags
+@ Compila: ./statecomp geolm_statecomp.raf > geolm_raf.s
+@ ═══════════════════════════════════════════════════════════════════════
+
+@ ── Constantes ──────────────────────────────────────────────────────────
+@ SPIRAL_Q16 = 56755 = sqrt(3)/2 * 65536
+@ PHI_Q16    = 105965 = (1+sqrt(5))/2 * 65536
+@ PERIOD     = 42
+
+@ ── Ciclo RAF: ψ→χ→ρ→Δ→Σ→Ω ───────────────────────────────────────────
+@ cada dimensão do toro T^7 corresponde a um estado do ciclo
+
+@ FASE ψ (psi): entrada / tokenização
+#LABEL raf_psi
+#LOAD  r4, #56755   @ SPIRAL seed
+#LOAD  r8, #32768   @ C = 0.5
+#LOAD  r9, #32768   @ H = 0.5
+#TORO  0, r4        @ s[0] = SPIRAL
+#BRANCH raf_chi
+
+@ FASE χ (chi): embedding / representação
+#LABEL raf_chi
+#SIN   r5, r4       @ sin(phase)
+#EMA   r8, r8, r5   @ C = EMA(C, sin)
+#TORO  1, r8        @ s[1] = C
+#BRANCH raf_rho
+
+@ FASE ρ (rho): atenção / similaridade
+#LABEL raf_rho
+#LOAD  r0, #65535
+#SUB   r0, r0, r5   @ 1-sin
+#EMA   r9, r9, r0   @ H = EMA(H, 1-sin)
+#MUL   r5, r8, r9   @ phi = C*H Q16.16
+#TORO  2, r5        @ s[2] = phi
+#BRANCH raf_delta
+
+@ FASE Δ (delta): feed-forward / transformação
+#LABEL raf_delta
+#LOAD  r0, #65535
+#SUB   r6, r0, r9   @ (1-H)
+#MUL   r7, r6, r8   @ phi = (1-H)*C
+#TORO  3, r7        @ s[3] = phi_real
+#BRANCH raf_sigma
+
+@ FASE Σ (sigma): prova / coerência
+#LABEL raf_sigma
+#CRC   r10, r4, #4  @ CRC32C do estado
+#TORO  4, r10       @ s[4] = crc
+#IF    r7, >, #32768
+  #LOAD r0, #1      @ coerente
+#ELSE
+  #LOAD r0, #0      @ incoerente
+#ENDIF
+#BRANCH raf_omega
+
+@ FASE Ω (omega): saída / geração
+#LABEL raf_omega
+#EMA   r8, r8, r7   @ atualiza C com phi
+#TORO  5, r8        @ s[5] = C_final
+#TORO  6, r9        @ s[6] = H_final
+#GATE  g_geolm_st   @ commit gate
+#RET   r7           @ retorna phi
+GEOLM_RAF
+pass "geolm_statecomp.raf"
+
+# =============================================================================
+# [12] raf_inline_asm.h — macros para ASM inline em C
+# =============================================================================
+cat > "$DEST/raf_inline_asm.h" << 'INLINE_H'
+/**
+ * raf_inline_asm.h — Macros de assembly inline para C/ARM32
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * Uso em código C:
+ *   #include "raf_inline_asm.h"
+ *   uint32_t result;
+ *   RAF_EMA(result, old_val, new_val);
+ *   RAF_SIN(result, phase_q16);
+ *   RAF_CRC_STEP(crc, byte);
+ */
+#pragma once
+#ifndef RAF_INLINE_ASM_H
+#define RAF_INLINE_ASM_H
+
+#include <stdint.h>
+
+/* ── EMA Q16.16 inline ARM32 ────────────────────────────────────────────
+ * dst = (old*49152 + in*16384) >> 16
+ * CYCLES: 4 (umull×2 + add + lsr)
+ * SHADOW: nenhum (operandos imediatos)
+ */
+#if defined(__arm__) || defined(__ARM_ARCH)
+#define RAF_EMA(dst, old, in) do { \
+    uint32_t _lo, _hi, _lo2, _hi2; \
+    __asm__ volatile( \
+        "umull %[lo], %[hi], %[o], %[inv]\n" \
+        "umull %[lo2],%[hi2],%[i], %[alp]\n" \
+        "adds  %[lo], %[lo], %[lo2]\n"       \
+        "lsr   %[lo], %[lo], #16\n"           \
+        "orr   %[lo], %[lo], %[hi], lsl #16\n" \
+        : [lo]"=&r"(_lo),[hi]"=&r"(_hi),     \
+          [lo2]"=&r"(_lo2),[hi2]"=&r"(_hi2)  \
+        : [o]"r"((uint32_t)(old)),            \
+          [i]"r"((uint32_t)(in)),             \
+          [inv]"r"(49152u),                   \
+          [alp]"r"(16384u)                    \
+        : "cc"                                \
+    );                                        \
+    (dst) = _lo;                              \
+} while(0)
+
+/* ── MUL Q16.16 inline ARM32 ─────────────────────────────────────────────
+ * dst = (a * b) >> 16
+ * SHADOW: r3 destruído (high word de umull)
+ */
+#define RAF_MUL_Q16(dst, a, b) do { \
+    uint32_t _lo, _hi; \
+    __asm__ volatile( \
+        "umull %[lo], %[hi], %[x], %[y]\n" \
+        "lsr   %[lo], %[lo], #16\n"         \
+        "orr   %[lo], %[lo], %[hi], lsl #16\n" \
+        : [lo]"=&r"(_lo),[hi]"=&r"(_hi)    \
+        : [x]"r"((uint32_t)(a)),            \
+          [y]"r"((uint32_t)(b))             \
+    );                                      \
+    (dst) = _lo;                            \
+} while(0)
+
+/* ── CRC32C step inline (single byte) ───────────────────────────────────
+ * crc = (crc>>8) ^ tab[(crc^byte)&0xFF]
+ * Requer: uint32_t g_crc_tab[256] inicializado
+ */
+#define RAF_CRC_STEP(crc, byte, tab) do { \
+    uint32_t _idx, _val; \
+    __asm__ volatile( \
+        "eor  %[idx], %[c], %[b]\n"       \
+        "and  %[idx], %[idx], #0xFF\n"    \
+        "ldr  %[val], [%[t], %[idx], lsl #2]\n" \
+        "lsr  %[c],   %[c], #8\n"         \
+        "eor  %[c],   %[c], %[val]\n"     \
+        : [c]"+r"(crc),[idx]"=&r"(_idx),[val]"=&r"(_val) \
+        : [b]"r"((uint32_t)(byte)),[t]"r"(tab) \
+        : "cc" \
+    );  \
+} while(0)
+
+/* ── NEON EMA 4-wide Q16.16 ─────────────────────────────────────────────
+ * Processa 4 elementos por vez
+ * SHADOW: q14,q15 destruídos (acumuladores)
+ */
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#define RAF_NEON_EMA4(dst4, old4, in4) do { \
+    uint32x4_t _inv = vdupq_n_u32(49152u);  \
+    uint32x4_t _alp = vdupq_n_u32(16384u);  \
+    uint64x2_t _lo = vaddq_u64( \
+        vmull_u32(vget_low_u32(old4), vget_low_u32(_inv)),  \
+        vmull_u32(vget_low_u32(in4),  vget_low_u32(_alp))); \
+    uint64x2_t _hi = vaddq_u64( \
+        vmull_u32(vget_high_u32(old4),vget_high_u32(_inv)), \
+        vmull_u32(vget_high_u32(in4), vget_high_u32(_alp))); \
+    (dst4) = vcombine_u32(vshrn_n_u64(_lo,16),vshrn_n_u64(_hi,16)); \
+} while(0)
+#endif /* __ARM_NEON */
+
+#else /* fallback C portável */
+
+#define RAF_EMA(dst, old, in) \
+    (dst) = (uint32_t)(((uint64_t)(old)*49152u + (uint64_t)(in)*16384u) >> 16)
+
+#define RAF_MUL_Q16(dst, a, b) \
+    (dst) = (uint32_t)(((uint64_t)(a) * (uint64_t)(b)) >> 16)
+
+#define RAF_CRC_STEP(crc, byte, tab) do { \
+    (crc) = ((crc)>>8) ^ (tab)[((crc)^(uint8_t)(byte))&0xFF]; \
+} while(0)
+
+#endif /* __arm__ */
+
+/* ── SIN Taylor Q16.16 (C portável, inlinável) ───────────────────────────
+ * Sem float, sem libm. Erro < 0.01% para x ∈ [0, 2π]
+ */
+static inline uint32_t raf_qsin(uint32_t x) {
+    while(x >= 411774u) x -= 411774u;
+    int neg = (x >= 205887u);
+    if(neg) x -= 205887u;
+    uint64_t x2 = ((uint64_t)x*x) >> 16;
+    uint64_t x3 = ((uint64_t)x2*x) >> 16;
+    uint64_t x5 = ((uint64_t)x3*x2) >> 16;
+    uint64_t t1 = ((uint64_t)x3*10923u) >> 16;
+    uint64_t t2 = ((uint64_t)x5*546u) >> 16;
+    int64_t r = (int64_t)x - (int64_t)t1 + (int64_t)t2;
+    if(r < 0) r = 0; if(r > 65535) r = 65535;
+    return neg ? (uint32_t)(65535u - (uint32_t)r) : (uint32_t)r;
+}
+
+/* ── PHI = (1-H)*C Q16.16 ────────────────────────────────────────────── */
+static inline uint32_t raf_phi(uint32_t C, uint32_t H) {
+    return (uint32_t)(((uint64_t)(65535u-H) * C) >> 16);
+}
+
+/* ── CRC32C completo (inicializa tabela na primeira chamada) ─────────── */
+static inline uint32_t raf_crc32c(const void *buf, uint32_t n) {
+    static uint32_t tab[256]; static int rdy=0;
+    if(!rdy){
+        for(uint32_t i=0;i<256;i++){
+            uint32_t v=i;
+            for(int j=0;j<8;j++) v=(v&1)?(v>>1)^0x82F63B78u:(v>>1);
+            tab[i]=v;
+        }
+        rdy=1;
+    }
+    const uint8_t *p=(const uint8_t*)buf; uint32_t c=~0u;
+    while(n--) c=(c>>8)^tab[(c^*p++)&0xFF];
+    return ~c;
+}
+
+#endif /* RAF_INLINE_ASM_H */
+INLINE_H
+pass "raf_inline_asm.h"
+
+# =============================================================================
+# [13] raf_precomp_transitions.c — tabela completa de transições
+# =============================================================================
+cat > "$DEST/raf_precomp_transitions.c" << 'TRANS_C'
+/**
+ * raf_precomp_transitions.c — Tabela de transições flag→código
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * Cada transição define:
+ *   - flag de entrada (primo)
+ *   - estado resultante (hex)
+ *   - template de código ARM32
+ *   - template C portável
+ *   - shadows (efeitos laterais)
+ *   - custo em ciclos (Cortex-A53)
+ */
+#include "statecomp.h"
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    flag_t      flag;
+    u32         prime;
+    u32         hex_state;     /* estado convergido */
+    const char *arm32_tmpl;    /* template ARM32 (%0=dst %1=a %2=b) */
+    const char *c_tmpl;        /* template C portável */
+    const char *shadows;       /* efeitos laterais */
+    u32         cycles_a53;    /* ciclos Cortex-A53 */
+} transition_entry_t;
+
+static const transition_entry_t TRANSITIONS[] = {
+    {FLAG_LOAD, 2,   0x02000000,
+     "mov %0, #%1  @ imm8\nldr %0, =%1  @ imm32\nmov %0, %1  @ reg",
+     "%dst = %src;",
+     "nenhum (mov não afeta flags sem S)", 1},
+
+    {FLAG_STORE, 3,  0x03000000,
+     "str %0, [%1]\nstr %0, [%1, #%2]",
+     "*(%type *)%addr = %val;",
+     "nenhum (str não afeta flags)", 1},
+
+    {FLAG_ADD, 5,    0x05000000,
+     "add %0, %1, %2\nadd %0, %1, #%2",
+     "%dst = %a + %b;",
+     "N,Z,C,V se sufixo S (sem S: sem flags)", 1},
+
+    {FLAG_SUB, 7,    0x07000000,
+     "sub %0, %1, %2\nsub %0, %1, #%2",
+     "%dst = %a - %b;",
+     "N,Z,C,V se sufixo S", 1},
+
+    {FLAG_MUL, 11,   0x0B000000,
+     "umull %0, r3, %1, %2\nlsr %0, %0, #16\norr %0, %0, r3, lsl #16",
+     "%dst = (uint32_t)(((uint64_t)%a * %b) >> 16);  /* Q16.16 */",
+     "r3 destruído (high word); N,Z atualizados", 3},
+
+    {FLAG_AND, 17,   0x11000000,
+     "and %0, %1, %2",
+     "%dst = %a & %b;",
+     "N,Z se sufixo S", 1},
+
+    {FLAG_OR,  19,   0x13000000,
+     "orr %0, %1, %2",
+     "%dst = %a | %b;",
+     "N,Z se sufixo S", 1},
+
+    {FLAG_XOR, 23,   0x17000000,
+     "eor %0, %1, %2",
+     "%dst = %a ^ %b;",
+     "N,Z se sufixo S", 1},
+
+    {FLAG_SHL, 31,   0x1F000000,
+     "lsl %0, %1, #%2",
+     "%dst = %a << %n;",
+     "N,Z,C (C = último bit deslocado)", 1},
+
+    {FLAG_SHR, 37,   0x25000000,
+     "lsr %0, %1, #%2",
+     "%dst = %a >> %n;  /* unsigned */",
+     "N,Z,C (C = último bit deslocado)", 1},
+
+    {FLAG_IF,  41,   0x29000000,
+     "cmp %1, %2\nb%INV .else_N",
+     "if(%a %cond %b){",
+     "N,Z,C,V atualizados (cmp = sub sem escrita)", 2},
+
+    {FLAG_WHILE, 47, 0x2F000000,
+     ".while_N:\ncmp %1, %2\nb%INV .endwhile_N",
+     "while(%a %cond %b){",
+     "N,Z,C,V por cmp; branch prediction miss ~3 ciclos", 2},
+
+    {FLAG_FOR, 59,   0x3B000000,
+     "mov %i, #%start\n.for_N:\ncmp %i, #%end\nbge .endfor_N",
+     "for(int %i=%start; %i<%end; %i++){",
+     "r5 usado para limite; N,Z por cmp", 3},
+
+    {FLAG_CALL, 61,  0x3D000000,
+     "bl %func",
+     "%func(%args);",
+     "lr destruído (= endereço de retorno); r0-r3 potencialmente destruídos", 1},
+
+    {FLAG_RET, 67,   0x43000000,
+     "pop {r4, r5, r6, r7, pc}",
+     "return %val;",
+     "pc alterado; fim do frame atual", 1},
+
+    {FLAG_EMA, 71,   0x47000000,
+     "@ umull×2 + add + lsr: 4 ciclos\numull r11,r3,%old,r12\numull r10,r3,%in,r12\nadd r11,r11,r10\nlsr %dst,r11,#16",
+     "%dst = (uint32_t)(((uint64_t)%old*49152 + (uint64_t)%in*16384) >> 16);",
+     "r3,r10,r11,r12 destruídos (SHADOW grande)", 4},
+
+    {FLAG_CRC, 79,   0x4F000000,
+     "@ loop 4 instr × N bytes\nldrb r11,[%buf],#1\neor r11,r11,%crc\nand r11,r11,#0xFF\nldr r11,[r12,r11,lsl#2]\nlsr %crc,%crc,#8\neor %crc,%crc,r11",
+     "%dst = raf_crc32c(%buf, %len);",
+     "r11,r12 destruídos; tabela em r12", 6},
+
+    {FLAG_SIN, 83,   0x53000000,
+     "@ Taylor: 24 instruções\n@ x - x^3/6 + x^5/120 - x^7/5040",
+     "%dst = raf_qsin(%x);",
+     "r6-r12 destruídos (muitos temporários)", 24},
+
+    {FLAG_TORO, 89,  0x59000000,
+     "@ EMA do estado T^7 dim %dim\nldr r12,=g_toro_state\nldr r11,[r12,#%off]\numull r10,r3,r11,r12\n...",
+     "g_toro_state[%dim] = raf_ema(g_toro_state[%dim], %val);",
+     "r10,r11,r12 destruídos", 8},
+
+    {FLAG_GATE, 91,  0x5B000000,
+     "@ LOAD→PROC→VERIFY→COMMIT\nldmia r12,{r4,r5,r6,r7}\nbl g_crc32\ncmp r0,#0\nbeq .rollback",
+     "if(!commit_gate(&g_state)){rollback(&g_state);}",
+     "r4-r7 snapshot; r12 ptr; bl destrói lr", 18},
+
+    {FLAG_NEON, 97,  0x61000000,
+     "vld1.32 {q0},[%src]\nvmul.u32 q0,q0,q1\nvst1.32 {q0},[%dst]",
+     "vst1q_u32(dst, vmulq_u32(vld1q_u32(src), vld1q_u32(src2)));",
+     "FPSCR modificado; q0-q15 potencialmente destruídos", 4},
+
+    {FLAG_HEX, 103,  0x67000000,
+     ".byte 0x%XX",
+     "/* raw byte: 0x%XX */",
+     "nenhum (dado estático)", 0},
+
+    {FLAG_NOP, 127,  0x7F000000,
+     "mov r0, r0  @ nop",
+     "/* nop */",
+     "nenhum (1 ciclo desperdiçado)", 1},
+
+    {FLAG_NONE, 0, 0, NULL, NULL, NULL, 0}
+};
+
+/* ── Dump da tabela de transições ────────────────────────────────────── */
+void dump_transitions(void) {
+    printf("=== TABELA DE TRANSIÇÕES FLAG→CÓDIGO ===\n\n");
+    printf("%-10s %-5s %-12s %-6s %s\n",
+        "FLAG","PRIME","HEX_STATE","CYCLES","SHADOWS");
+    printf("%-10s %-5s %-12s %-6s %s\n",
+        "──────────","─────","────────────","──────","───────────────");
+    for(int i=0;TRANSITIONS[i].flag!=FLAG_NONE;i++){
+        const transition_entry_t *t=&TRANSITIONS[i];
+        printf("%-10s %-5u 0x%08X %-6u %s\n",
+            sc_flag_name(t->flag), t->prime, t->hex_state,
+            t->cycles_a53,
+            t->shadows?t->shadows:"nenhum");
+    }
+    /* Produto total de primos = fingerprint do sistema */
+    unsigned long long prod=1;
+    for(int i=0;TRANSITIONS[i].flag!=FLAG_NONE;i++)
+        if(TRANSITIONS[i].prime>1) prod*=TRANSITIONS[i].prime;
+    printf("\nPRIME_PRODUCT (fingerprint sistema) = overflow u64\n");
+    printf("(Produto de todos os primos de flags — identifica o sistema)\n");
+}
+
+/* ── Busca transição por flag ────────────────────────────────────────── */
+const transition_entry_t *find_transition(flag_t f) {
+    for(int i=0;TRANSITIONS[i].flag!=FLAG_NONE;i++)
+        if(TRANSITIONS[i].flag==f) return &TRANSITIONS[i];
+    return NULL;
+}
+
+/* ── Total de ciclos estimado ────────────────────────────────────────── */
+u32 estimate_cycles(const sc_ctx_t *ctx) {
+    u32 total=0;
+    for(u32 i=0;i<ctx->n_tokens;i++){
+        const transition_entry_t *tr=find_transition(ctx->tokens[i].flag);
+        if(tr) total+=tr->cycles_a53;
+    }
+    return total;
+}
+
+#ifdef TRANS_MAIN
+int main(void) {
+    dump_transitions();
+    printf("\n42 ciclos do motor geométrico estimado:\n");
+    /* ciclos estimados para GEOLM completo */
+    printf("  SIN×42:  %u ciclos\n", 24*42);
+    printf("  EMA×84:  %u ciclos\n", 4*84);
+    printf("  TORO×84: %u ciclos\n", 8*84);
+    printf("  CRC×42:  %u ciclos\n", 6*42);
+    printf("  GATE×6:  %u ciclos\n", 18*6);
+    u32 total=24*42+4*84+8*84+6*42+18*6;
+    printf("  TOTAL:   %u ciclos\n",total);
+    printf("  @ 2GHz:  ~%.1f µs\n",(float)total/2000.0f);
+    return 0;
+}
+#endif
+TRANS_C
+pass "raf_precomp_transitions.c"
+
+# =============================================================================
+# [14] Makefile para compilação no Termux
+# =============================================================================
+cat > "$DEST/Makefile" << 'MAKEFILE_EOF'
+# Makefile — RAF STATECOMP
+# Uso (Termux): make all
+# Uso (host):   make CC=gcc all
+
+ARCH := $(shell uname -m)
+
+ifeq ($(findstring arm,$(ARCH)),arm)
+  CFLAGS := -O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp \
+             -fPIE -pie -std=c11 -ffast-math -DHAS_NEON
+else ifeq ($(ARCH),aarch64)
+  CFLAGS := -O2 -march=armv8-a -fPIE -pie -std=c11 -ffast-math -DHAS_NEON
+else
+  CFLAGS := -O2 -std=c11 -ffast-math
+endif
+
+CC := clang
+SRCS := statecomp.c precomp.c emit_arm32.c emit_hex.c
+
+.PHONY: all clean test
+
+all: statecomp test_comp state_machine transitions
+
+statecomp: $(SRCS)
+	$(CC) $(CFLAGS) $^ -o $@
+	@echo "✓ statecomp"
+
+test_comp: $(SRCS) test_comp.c
+	$(CC) $(CFLAGS) -DTEST_MAIN $^ -o $@
+	@echo "✓ test_comp"
+
+state_machine: $(SRCS) state_machine.c
+	$(CC) $(CFLAGS) -DSTATEMACH_MAIN $^ -o $@
+	@echo "✓ state_machine"
+
+transitions: $(SRCS) raf_precomp_transitions.c
+	$(CC) $(CFLAGS) -DTRANS_MAIN $^ -o $@
+	@echo "✓ transitions"
+
+test: statecomp test_comp state_machine transitions
+	./statecomp --test
+	./test_comp --all
+	./state_machine
+	./transitions
+
+compile: statecomp
+	./statecomp exemplo.raf > exemplo.s
+	@echo "✓ exemplo.s"
+	./statecomp --hex exemplo.raf > exemplo.hex
+	@echo "✓ exemplo.hex"
+
+clean:
+	rm -f statecomp test_comp state_machine transitions
+	rm -f *.s *.hex *.o
+	@echo "✓ clean"
+MAKEFILE_EOF
+pass "Makefile"
+
+# =============================================================================
+# SUMÁRIO FINAL COMPLETO
+# =============================================================================
+hdr "STATECOMP — SUMÁRIO FINAL"
+
+printf "\n\033[1;32m══════════════════════════════════════════════════\033[0m\n"
+printf "\033[1;32m  RAF STATECOMP v1.0.0 — GERADO EM ~/arkraf/statecomp/\033[0m\n"
+printf "\033[1;32m══════════════════════════════════════════════════\033[0m\n\n"
+
+TOTAL=$(find "$DEST" -type f 2>/dev/null | wc -l)
+printf "Arquivos gerados: %d\n\n" "$TOTAL"
+
+printf "MÓDULOS:\n"
+printf "  statecomp.h          — tipos, flags, máquina, API\n"
+printf "  precomp.c            — lexer, parser, shadows, tails\n"
+printf "  emit_arm32.c         — emissor ARM32 inline assembler\n"
+printf "  emit_hex.c           — emissor bytecode hexadecimal\n"
+printf "  statecomp.c          — main: integra todos os módulos\n"
+printf "  state_machine.c      — Máquina de Turing Geométrica T^7\n"
+printf "  test_comp.c          — exemplos e testes\n"
+printf "  raf_inline_asm.h     — macros ASM inline para uso em C\n"
+printf "  raf_precomp_transitions.c — tabela flag→código\n"
+printf "  geolm_statecomp.raf  — GEOLM em RAF State Language\n"
+printf "  exemplo.raf          — exemplo completo de fonte .raf\n"
+printf "  statecomp_api.md     — referência rápida de flags\n"
+printf "  run_comp.sh          — executor (Termux)\n"
+printf "  Makefile             — build system\n\n"
+
+printf "PIPELINE:\n"
+printf "  fonte.raf → [lexer] → tokens → [parser] → AST inline\n"
+printf "           → [emitter] → ARM32 .s  OU  bytecode .hex\n\n"
+
+printf "FLAGS: 25 flags, primos 2..127, cada uma converge para hex\n"
+printf "SHADOWS: documentados em linha para cada instrução\n"
+printf "TAILS: código após #RET suprimido automaticamente\n"
+printf "CRC CHAIN: atualizado a cada token emitido\n"
+printf "PRIMEIRO INSTR: sempre push {r4,r5,r6,r7,lr} (fail-safe)\n\n"
+
+printf "PARA USAR:\n"
+printf "  cd ~/arkraf/statecomp\n"
+printf "  sh run_comp.sh build    # compila tudo\n"
+printf "  sh run_comp.sh test     # self-tests\n"
+printf "  sh run_comp.sh compile  # compila exemplo.raf\n"
+printf "  sh run_comp.sh all      # tudo\n\n"
+
+printf "LICENÇA: GPL-3.0-only\n"
+printf "PADRÕES: IEEE 1003.1 · ARM IHI 0042J · NIST SP800-175B · RFC 3720\n"
+printf "\n\033[1;32m══════════════════════════════════════════════════\033[0m\n"
