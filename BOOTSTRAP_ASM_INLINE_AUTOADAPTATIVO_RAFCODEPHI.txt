@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# BOOTSTRAP_ASM_INLINE_AUTOADAPTATIVO_RAFCODEPHI.txt
+# ==============================================================================
+#
+# OBJETIVO:
+#   TXT UNICO, GRANDE, AUTOCONTIDO, PARA O CODEX LER E MATERIALIZAR.
+#
+#   Este arquivo gera um bootstrap em fragmentos ASM/C-preprocessado:
+#   - auto-adaptativo por ISA via macros do assembler/preprocessor;
+#   - ARM64 usa registradores X;
+#   - ARM32 usa registradores R;
+#   - x86_64 usa RAX/RDI/RSI/RDX;
+#   - x86 usa EAX/EBX/ECX/EDX;
+#   - cada modulo gera .o separado;
+#   - pipeline tem failsafe e rollback de artefatos;
+#   - cada fragmento tem flag propria;
+#   - hex blobs entram como .byte/.incbin-style para reduzir simbolo textual;
+#   - sem malloc;
+#   - sem libc no nucleo ASM;
+#   - com build de smoke test;
+#   - com relatorio.
+#
+# IMPORTANTE:
+#   Nao existe "detectar nome de registrador" de ISA diferente em runtime,
+#   porque registrador e parte da ISA antes do binario existir.
+#   A auto-adaptacao correta e por:
+#     1. deteccao no build;
+#     2. macros do assembler .S;
+#     3. flags -DRAF_ARCH_*;
+#     4. fragmentos por ABI;
+#     5. dispatch por simbolo comum.
+#
+# USO:
+#   bash BOOTSTRAP_ASM_INLINE_AUTOADAPTATIVO_RAFCODEPHI.txt materialize
+#   cd bootstrap_asm_inline
+#   bash scripts/build_fragments.sh
+#   bash scripts/verify_fragments.sh
+#
+# SAIDA:
+#   bootstrap_asm_inline/
+#     include/
+#     asm/
+#     scripts/
+#     build/
+#     reports/
+#
+# ==============================================================================
+# F DE RESOLVIDO:
+#   Este TXT entrega estrutura, modulos, flags, ASM, build e validacao.
+#
+# F DE GAP:
+#   Isto e bootstrap ASM/probe/dev. Nao e bootstrap runtime completo do Termux.
+#
+# F DE NEXT:
+#   1. ligar estes .o no Gradle/CMake;
+#   2. gerar bootstrap ZIP dev-local;
+#   3. depois endurecer release/runtime.
+# ==============================================================================
+
+set -euo pipefail
+
+if [ "${1:-}" != "materialize" ]; then
+  cat <<'HELP'
+BOOTSTRAP_ASM_INLINE_AUTOADAPTATIVO_RAFCODEPHI.txt
+
+Este TXT e um gerador autocontido.
+Para materializar os arquivos:
+
+  bash BOOTSTRAP_ASM_INLINE_AUTOADAPTATIVO_RAFCODEPHI.txt materialize
+
+Depois:
+
+  cd bootstrap_asm_inline
+  bash scripts/build_fragments.sh
+  bash scripts/verify_fragments.sh
+
+HELP
+  exit 0
+fi
+
+ROOT="bootstrap_asm_inline"
+mkdir -p "$ROOT/include" "$ROOT/asm" "$ROOT/scripts" "$ROOT/build" "$ROOT/reports"
+
+# ==============================================================================
+# README
+# ==============================================================================
+cat > "$ROOT/README_BOOTSTRAP_ASM.md" <<'EOF2'
+# RAFCODEPHI — Bootstrap ASM Inline Auto-adaptativo
+
+Este pacote foi gerado por um TXT unico.
+
+## Ideia central
+
+O bootstrap e dividido em fragmentos `.S` para gerar multiplos `.o`.
+
+Cada fragmento usa o mesmo contrato externo:
+
+- `raf_bootstrap_entry`
+- `raf_write_stdout`
+- `raf_exit_code`
+- `raf_probe_register_model`
+- `raf_checkpoint_save`
+- `raf_checkpoint_restore`
+- `raf_hex_manifest_begin`
+- `raf_hex_manifest_end`
+
+A adaptacao por registrador acontece por arquitetura:
+
+| ISA | Registradores | Syscall |
+|---|---|---|
+| ARM64/AArch64 | x0-x30 | x8 = nr, svc #0 |
+| ARM32/ARMv7 | r0-r15 | r7 = nr, svc #0 |
+| x86_64 | rax/rdi/rsi/rdx | syscall |
+| x86/i386 | eax/ebx/ecx/edx | int 0x80 |
+
+## Regra importante
+
+Nao existe binario unico que use X e R ao mesmo tempo. O build escolhe o fragmento certo usando macros:
+
+- `__aarch64__`
+- `__arm__`
+- `__x86_64__`
+- `__i386__`
+
+O mesmo arquivo `.S` pode conter todos os caminhos, mas o assembler compila apenas o caminho da ISA atual.
+
+## Failsafe/Rollback
+
+O rollback existe em duas camadas:
+
+1. **Build rollback**: se um `.o` falha, o script remove parcial e restaura o ultimo `.ok`.
+2. **Runtime checkpoint**: modulos ASM expõem `raf_checkpoint_save` e `raf_checkpoint_restore`.
+
+## O que isto NAO e
+
+Isto nao substitui o bootstrap real do Termux.
+Isto e uma base ASM dev/probe para o Codex dividir, compilar e ligar no projeto.
+
+EOF2
+
+echo "MATERIALIZED: $ROOT"
