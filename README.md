@@ -286,6 +286,12 @@ Para destravar rapidamente a cadeia completa local (SDK + hashes bootstrap + APK
 ./scripts/hotfix_ate_compilar.sh
 ```
 
+Modos:
+
+- padrão: executa `build_apk_matrix` (já inclui preflight, hashes, testes, assemble e assinatura local de validação).
+- `--full`: força as etapas explícitas de preflight+hashes+assemble e depois roda a matriz.
+- `--assemble-only`: roda apenas preflight+hashes+assemble.
+
 O script preserva o contrato oficial de release: quando não há secrets oficiais, a assinatura usada em `dist/apk-matrix/signed/` é somente de validação interna.
 
 ### Release build signing (signed or unsigned)
