@@ -152,6 +152,11 @@ Variáveis exportadas por `prepare_bootstrap_env.sh`:
 - `TERMUX_BOOTSTRAP_BLAKE3_I686`
 - `TERMUX_BOOTSTRAP_BLAKE3_X86_64`
 
+O payload local de bootstrap usado pela trilha de CI/actions é criado no momento da execução por
+`scripts/build_rafaelia_bootstraps.sh` em `build/generated/rafaelia-bootstrap/common/` e só então
+empacotado em `app/src/main/cpp/bootstrap-*.zip`. Assim, `bin/sh`, `bin/pkg`, `bin/busybox` e
+`bin/proot` não dependem de um diretório `bin` pré-gerado como fonte de verdade do release.
+
 Release signing oficial é opcional e controlado por:
 
 - `TERMUX_ENABLE_RELEASE_SIGNING`

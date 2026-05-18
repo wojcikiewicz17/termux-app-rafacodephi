@@ -103,14 +103,11 @@ public class TermuxSession {
                     return null;
                 }
 
-                Error dependencyError = TermuxQualityManager.checkDependencies(currentPackageContext,
-                    Collections.singletonList("bash"));
-                if (dependencyError != null) {
-                    Logger.logError(LOG_TAG, "Shell dependency validation failed: " + dependencyError.getMessage());
-                    executionCommand.setStateFailed(dependencyError);
-                    TermuxSession.processTermuxSessionResult(null, executionCommand);
-                    return null;
-                }
+                // Do not hard-gate terminal startup on bash. The bootstrap contract only
+                // requires $PREFIX/bin/sh, and developer/CI bootstrap payloads may ship
+                // sh first while full package installation can add bash later. The login
+                // shell selection below still prefers bash when it exists and falls back
+                // through zsh, fish and sh.
             }
 
             if (!executionCommand.isFailsafe) {

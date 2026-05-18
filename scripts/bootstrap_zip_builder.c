@@ -18,7 +18,10 @@ static int w(int fd,const void*buf,size_t n){return write(fd,buf,n)==(ssize_t)n?
 typedef struct{const char*name;const uint8_t*data;uint32_t size;uint32_t crc;uint32_t off;} E;
 static uint8_t sh_buf[4096], pkg_buf[4096], motd_buf[4096], build_only_buf[64], busybox_buf[4096], proot_buf[4096], symlinks_buf[1];
 
-static int load_file(const char* path, uint8_t* out, uint32_t* n){
+static int load_file(const char* root, const char* relative_path, uint8_t* out, uint32_t* n){
+  char path[512];
+  int path_n=snprintf(path,sizeof(path),"%s/%s",root,relative_path);
+  if(path_n<=0||path_n>=(int)sizeof(path)) return -1;
   int fd=open(path,O_RDONLY);
   if(fd<0) return -1;
   ssize_t r=read(fd,out,4096);
@@ -34,20 +37,22 @@ int main(int argc,char**argv){
   static char info[256];
   const char* bootstrap_pkg=getenv("TERMUX_BOOTSTRAP_PACKAGE_NAME");
   const char* page_size=getenv("TERMUX_BOOTSTRAP_PAGE_SIZE");
+  const char* payload_root=getenv("RAF_BOOTSTRAP_SRC_DIR");
   const char* min_api="21";
   if(!bootstrap_pkg||!bootstrap_pkg[0]) bootstrap_pkg="com.termux.rafacodephi";
   if(!page_size||!page_size[0]) page_size="16384";
+  if(!payload_root||!payload_root[0]) payload_root="bootstrap_src/common";
   if(strcmp(abi,"arm")==0) min_api="28";
   int info_n=snprintf(info,sizeof(info),
     "TERMUX_PACKAGE_NAME=%s\nTERMUX_ARCH=%s\nTERMUX_PAGE_SIZE=%s\nTERMUX_MIN_API=%s\nRAFCODEPHI_BOOTSTRAP=local-ci\n",
     bootstrap_pkg,abi,page_size,min_api);
 
   uint32_t sh_n=0,pkg_n=0,motd_n=0,busybox_n=0,proot_n=0;
-  if(load_file("bootstrap_src/common/bin/sh", sh_buf, &sh_n)!=0) return 8;
-  if(load_file("bootstrap_src/common/bin/pkg", pkg_buf, &pkg_n)!=0) return 9;
-  if(load_file("bootstrap_src/common/bin/busybox", busybox_buf, &busybox_n)!=0) return 12;
-  if(load_file("bootstrap_src/common/bin/proot", proot_buf, &proot_n)!=0) return 13;
-  if(load_file("bootstrap_src/common/etc/motd", motd_buf, &motd_n)!=0) return 10;
+  if(load_file(payload_root,"bin/sh", sh_buf, &sh_n)!=0) return 8;
+  if(load_file(payload_root,"bin/pkg", pkg_buf, &pkg_n)!=0) return 9;
+  if(load_file(payload_root,"bin/busybox", busybox_buf, &busybox_n)!=0) return 12;
+  if(load_file(payload_root,"bin/proot", proot_buf, &proot_n)!=0) return 13;
+  if(load_file(payload_root,"etc/motd", motd_buf, &motd_n)!=0) return 10;
 
   const char* marker="BUILD_ONLY=1\nRUNTIME_READY=0\n";
   uint32_t build_only_n=(uint32_t)snprintf((char*)build_only_buf,sizeof(build_only_buf),"%s",marker);

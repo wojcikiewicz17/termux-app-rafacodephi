@@ -44,6 +44,17 @@ public class BetaReadinessContractTest {
         assertTrue(source.contains("return -1"));
     }
 
+    @Test
+    public void terminalStartupDoesNotHardGateOnBash() throws Exception {
+        String source = read("termux-shared/src/main/java/com/termux/shared/termux/shell/command/runner/terminal/TermuxSession.java");
+
+        assertTrue(source.contains("Do not hard-gate terminal startup on bash"));
+        assertTrue(source.contains("LOGIN_SHELL_BINARIES"));
+        assertTrue(source.contains("/system/bin/sh"));
+        assertTrue("terminal boot must not fail before shell fallback just because bash is absent",
+            !source.contains("Collections.singletonList(\"bash\")"));
+    }
+
     private static String read(String path) throws Exception {
         java.nio.file.Path candidate = Paths.get(path);
         if (!Files.exists(candidate)) {
