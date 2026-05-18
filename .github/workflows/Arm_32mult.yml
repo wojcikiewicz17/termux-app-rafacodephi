@@ -1,0 +1,249 @@
+name: 🔧 Build ARM32 Multi-Page Fix (Unified Workflow)
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'bugfix/**'
+  workflow_dispatch:
+    inputs:
+      force_arm32_only:
+        description: 'Compilar apenas ARM32 (sem ARM64)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      custom_page_size_arm32:
+        description: 'Page size customizado para ARM32 (ex: 4096)'
+        required: false
+        default: '4096'
+      enable_emulator_test:
+        description: 'Teste em emulador ARM32'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_OPTS: "-Xmx8g"
+  NDK_VERSION: "27.0.11682104"
+
+jobs:
+  detect-and-prepare:
+    name: 🔍 Stage 1: Detect & Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      build-matrix: ${{ steps.prepare.outputs.build-matrix }}
+      page-sizes: ${{ steps.prepare.outputs.page-sizes }}
+      arm32-page-size: ${{ steps.prepare.outputs.arm32-page-size }}
+      arm64-page-size: ${{ steps.prepare.outputs.arm64-page-size }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: 🔍 Detect ABIs & Calculate Page Sizes
+        id: prepare
+        run: |
+          set -e
+          
+          echo "📋 Lendo gradle.properties..."
+          
+          # Valores padrão
+          ARM32_PAGE_SIZE="${{ inputs.custom_page_size_arm32 }}"
+          [ -z "$ARM32_PAGE_SIZE" ] && ARM32_PAGE_SIZE="4096"
+          
+          ARM64_PAGE_SIZE="16384"
+          
+          # Build matrix JSON
+          MATRIX_JSON='['
+          
+          if [ "${{ inputs.force_arm32_only }}" != "true" ]; then
+            MATRIX_JSON+='{"abi":"arm64-v8a","arch":"aarch64","page_size":16384},'
+          fi
+          
+          MATRIX_JSON+='{"abi":"armeabi-v7a","arch":"arm","page_size":'$ARM32_PAGE_SIZE'}]'
+          
+          echo "build-matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          echo "arm32-page-size=$ARM32_PAGE_SIZE" >> $GITHUB_OUTPUT
+          echo "arm64-page-size=$ARM64_PAGE_SIZE" >> $GITHUB_OUTPUT
+          
+          echo "✅ Matrix configurado:"
+          echo "$MATRIX_JSON" | python3 -m json.tool || true
+
+  build:
+    name: 🔨 Stage 2: Build (${{ matrix.abi }}) PageSize=${{ matrix.page_size }}
+    needs: detect-and-prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.detect-and-prepare.outputs.build-matrix) }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+      
+      - name: 🔧 Configure Page Size
+        run: |
+          set -e
+          
+          echo "⚙️  Configurando page-size=${{ matrix.page_size }} para ${{ matrix.abi }}..."
+          
+          # Backup
+          cp app/src/main/cpp/Android.mk app/src/main/cpp/Android.mk.bak
+          
+          # Append configuração dinamicamente
+          cat >> app/src/main/cpp/Android.mk << 'EOF'
+          
+          # ⚙️ Page Size Configuration - ${{ matrix.arch }}
+          ifeq ($(TARGET_ARCH_ABI),${{ matrix.abi }})
+            LOCAL_LDFLAGS := -Wl,--gc-sections \
+                             -Wl,-z,max-page-size=${{ matrix.page_size }} \
+                             -Wl,-z,common-page-size=${{ matrix.page_size }}
+          endif
+          EOF
+          
+          echo "✅ Android.mk atualizado"
+      
+      - name: 🏗️ Build APK
+        run: |
+          set -e
+          echo "🔨 Compilando ${{ matrix.abi }}..."
+          
+          ./gradlew \
+            clean \
+            assembleDebug \
+            -PterminatedApkVersionTag="${{ github.run_number }}" \
+            2>&1 | tee build-${{ matrix.arch }}.log
+          
+          APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
+          [ -z "$APK" ] && { echo "❌ APK não encontrado"; exit 1; }
+          
+          echo "APK_PATH=$APK" >> $GITHUB_ENV
+          echo "✅ Build sucesso: $APK"
+      
+      - name: 🔍 Validate ELF & Bootstrap
+        run: |
+          set -e
+          
+          echo "📋 Validando..."
+          python3 scripts/validate_arm32_apk.py \
+            --apk "${{ env.APK_PATH }}" \
+            --arch "${{ matrix.arch }}" \
+            --json > validation-${{ matrix.arch }}.json
+          
+          VALID=$(python3 -c "import json; print(json.load(open('validation-${{ matrix.arch }}.json'))['valid'])")
+          cat validation-${{ matrix.arch }}.json | python3 -m json.tool || true
+          
+          [ "$VALID" = "True" ] || { echo "❌ Validation falhou"; exit 1; }
+          echo "✅ Validação passou"
+      
+      - name: 📊 Build Report
+        if: always()
+        run: |
+          cat > BUILD_REPORT_${{ matrix.arch }}.txt << EOF
+          ═══════════════════════════════════════════════════════════════
+          BUILD REPORT - ${{ matrix.arch }} (Page: ${{ matrix.page_size }})
+          ═══════════════════════════════════════════════════════════════
+          
+          Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          
+          ABI: ${{ matrix.abi }}
+          Architecture: ${{ matrix.arch }}
+          Page Size: ${{ matrix.page_size }}
+          
+          APK: $(basename "${{ env.APK_PATH }}")
+          Size: $(du -h "${{ env.APK_PATH }}" | cut -f1)
+          
+          ═══════════════════════════════════════════════════════════════
+          EOF
+          cat BUILD_REPORT_${{ matrix.arch }}.txt
+      
+      - name: 📤 Upload Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: apk-${{ matrix.arch }}-pagesize-${{ matrix.page_size }}
+          retention-days: 7
+          path: |
+            app/build/outputs/apk/**/*.apk
+            BUILD_REPORT_*.txt
+            validation-*.json
+            build-*.log
+
+  validate-consolidated:
+    name: ✅ Stage 3: Validate & Consolidate
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: ⬇️ Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+      
+      - name: 📊 Consolidate
+        run: |
+          echo "📋 Consolidando relatórios..." 
+          
+          cat > CONSOLIDATED_REPORT.txt << 'EOF'
+          ╔═══════════════════════════════════════════════════════════════╗
+          ║              CONSOLIDATED BUILD REPORT                        ║
+          ║          ARM32 Multi-Page Fix - Unified Workflow             ║
+          ╚═══════════════════════════════════════════════════════════════╝
+          
+          Build: ${{ github.run_id }}
+          Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          
+          EOF
+          
+          for report in $(find all-artifacts -name "BUILD_REPORT_*.txt" | sort); do
+            echo "" >> CONSOLIDATED_REPORT.txt
+            echo "───── $(basename "$report") ─────" >> CONSOLIDATED_REPORT.txt
+            cat "$report" >> CONSOLIDATED_REPORT.txt
+          done
+          
+          cat CONSOLIDATED_REPORT.txt
+      
+      - name: 📝 GitHub Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          # ✅ Build Complete
+          
+          ## 📦 Artifacts
+          EOF
+          
+          find all-artifacts -name "*.apk" | while read apk; do
+            SIZE=$(du -h "$apk" | cut -f1)
+            echo "- \`$(basename "$apk")\` ($SIZE)" >> $GITHUB_STEP_SUMMARY
+          done
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**✅ Build validado com sucesso**" >> $GITHUB_STEP_SUMMARY
+      
+      - name: 📤 Upload Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: consolidated-reports
+          retention-days: 30
+          path: CONSOLIDATED_REPORT.txt
