@@ -79,7 +79,7 @@ jobs:
           echo "$MATRIX_JSON" | python3 -m json.tool || true
 
   build:
-    name: 🔨 Stage 2: Build (${{ matrix.abi }}) PageSize=${{ matrix.page_size }}
+    name: 🔨 Stage 2 Build (${{ matrix.abi }}) PageSize=${{ matrix.page_size }}
     needs: detect-and-prepare
     runs-on: ubuntu-latest
     strategy:
@@ -206,8 +206,8 @@ jobs:
             validation-*.json
             build-*.log
 
-  validate-consolidated:
-    name: ✅ Stage 3: Validate & Consolidate
+  Validate:
+    name: ✅ StagenameValidate & nsolidate
     needs: build
     runs-on: ubuntu-latest
     if: always()
