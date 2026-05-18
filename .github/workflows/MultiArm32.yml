@@ -39,7 +39,7 @@ env:
 
 jobs:
   detect-and-prepare:
-    name: 🔍 Stage 1: Detect & Prepare
+    name: 🔍 Stage 1 Detect & Prepare
     runs-on: ubuntu-latest
     outputs:
       build-matrix: ${{ steps.prepare.outputs.build-matrix }}
